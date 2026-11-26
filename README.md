@@ -1,8 +1,32 @@
 # Folio Flow
 
-A fast, minimal PDF reader and page editor for Windows, written in Rust. It
-reads, searches, copies text, prints, exports to Markdown, and edits page order,
-rotation, and deletion.
+**让阅读沉浸，让整理流动。**
+
+Folio Flow 是一款基于 Rust 的 Windows PDF 阅读与页面编辑工具。在 [原版 Folio](https://github.com/Dethon/folio) 的基础上，**完整重构 UI 与交互体验**：从浮动工具栏、页面导航到全屏页面编排，从亮暗主题到弹窗与拖放反馈，重新打磨每一处日常操作。
+
+轻盈的界面，直接的操作，恰到好处的动效。打开文档、沉浸阅读、拖动整理，再以你需要的格式导出——让 PDF 工作流更顺手，也更赏心悦目。
+
+## 全新界面，为专注而设计
+
+- **亮暗双主题，两种完整设计。** 亮色清透舒展，以细腻的玻璃质感边缘与柔和投影建立层次；暗色采用深空灰，精心平衡背景、面板与高光，让工具清晰可辨，让内容始终成为视觉中心。
+- **浮动工具栏，功能触手可及。** 文件、阅读与页面编辑分组布局，统一图标、圆角和状态反馈，把常用操作放在自然的视线路径上。
+- **精心调试的交互动画。** 页面拖动时相邻卡片自然让位，插入位置随光标实时呈现，靠近边缘自动滚动；面板切换与弹窗进出延续一致的过渡节奏。每一次移动都有回应，每一个落点都清楚可见。
+- **从阅读到编排，一气呵成。** 缩略图导航与页面总览自由切换，支持拖动排序、旋转、删除及撤销重做；把图片或另一个 PDF 拖入指定位置，即可接入当前文档。
+- **中文界面，完整输出。** 支持 Markdown、JPG、PNG 导出，以及 PDF 整理与纯图压缩；图片以 72 DPI 为 1×，可选更高倍率，并在操作前查看尺寸或文件大小预估。
+
+### 亮色模式 · 清透、轻盈、专注
+
+![Folio Flow 亮色阅读界面：浮动工具栏、页面缩略图导航与 PDF 阅读画布](docs/images/ui-light-reader.png)
+
+### 深色模式 · 深空灰中的清晰层次
+
+![Folio Flow 深色阅读界面：深空灰背景、柔和投影与清晰的工具状态](docs/images/ui-dark-reader.png)
+
+### 页面编排 · 让整份文档尽在掌握
+
+![Folio Flow 深色页面编排界面：网格缩略图、页面选择与编辑工具栏](docs/images/ui-dark-organizer.png)
+
+截图展示实际运行界面；示例文档中的内容与商标归各自权利人所有。
 
 Rendering is [PDFium](https://pdfium.googlesource.com/pdfium/) (the engine in
 Chrome); the interface is [Iced](https://iced.rs) on the GPU.

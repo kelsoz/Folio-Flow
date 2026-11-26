@@ -1,0 +1,52 @@
+name: Windows build
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Windows x64 portable
+    runs-on: windows-2025
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install repository Rust toolchain
+        run: rustup show active-toolchain
+
+      - name: Download PDFium
+        run: ./scripts/fetch-pdfium.ps1
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run tests
+        run: cargo test --locked -- --test-threads=1
+
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Build and verify portable package
+        run: ./scripts/build-windows.ps1
+
+      - name: Upload portable package
+        uses: actions/upload-artifact@v6
+        with:
+          name: Folio-Flow-Windows-x64
+          path: dist/Folio Flow/
+          if-no-files-found: error
+          retention-days: 30

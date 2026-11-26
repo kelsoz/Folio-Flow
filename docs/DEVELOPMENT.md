@@ -18,6 +18,12 @@ pwsh -File scripts/build-windows.ps1
 
 Linux/WSL 跨编译入口保留为 `scripts/package-windows.sh`；安装器定义在 `installer/folio.nsi`，两者也使用 Folio Flow 的交付命名。
 
+## GitHub 云端构建
+
+推送到 `master` 会自动运行 [Windows build](https://github.com/kelsoz/Folio-Flow/actions/workflows/windows.yml)，也可以在该页面点击 **Run workflow** 手动运行。Windows x64 云端环境使用仓库指定的 Rust 版本，下载 PDFium，检查格式、运行测试和 Clippy，再执行同一本地打包脚本及导出检查。
+
+成功后，在运行详情底部的 **Artifacts** 下载 `Folio-Flow-Windows-x64`，解压后运行 `Folio Flow.exe`；请保留同目录的 `pdfium.dll`。构建包保留 30 天，需要登录 GitHub 下载。本流程不创建 Release、不签名，也不生成安装器。
+
 ## 需要保护的约定
 
 - 单个 Engine worker 持有 PDFium，UI 不并发调用内核。

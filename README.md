@@ -1,22 +1,24 @@
 # Folio Flow
 
+**简体中文** · [English](README.en.md)
+
 **让阅读沉浸，让整理流动。**
 
-Folio Flow 是一款基于 Rust 的 Windows PDF 阅读与页面编辑工具。在 [原版 Folio](https://github.com/Dethon/folio) 的基础上，**完整重构 UI 与交互体验**：从浮动工具栏、页面导航到全屏页面编排，从亮暗主题到弹窗与拖放反馈，重新打磨每一处日常操作。
+Folio Flow 是一款基于 Rust 的 Windows PDF 阅读与页面编辑工具。在 [原版 Folio](https://github.com/Dethon/folio) 的基础上，**完整重构 UI 与交互体验**：从浮动工具栏、页面导航到页面编排，从亮暗主题到弹窗与拖放反馈，重新打磨每一处日常操作。
 
 轻盈的界面，直接的操作，恰到好处的动效。打开文档、沉浸阅读、拖动整理，再以你需要的格式导出——让 PDF 工作流更顺手，也更赏心悦目。
 
 ## 全新界面，为专注而设计
 
-- **亮暗双主题，两种完整设计。** 亮色清透舒展，以细腻的玻璃质感边缘与柔和投影建立层次；暗色采用深空灰，精心平衡背景、面板与高光，让工具清晰可辨，让内容始终成为视觉中心。
+- **亮暗双主题，两种完整设计。** 亮色清透舒展，以细腻的玻璃质感边缘与柔和投影建立层次；暗色采用深空灰，精心平衡背景、面板与高光，让内容始终成为视觉中心。
 - **浮动工具栏，功能触手可及。** 文件、阅读与页面编辑分组布局，统一图标、圆角和状态反馈，把常用操作放在自然的视线路径上。
-- **精心调试的交互动画。** 页面拖动时相邻卡片自然让位，插入位置随光标实时呈现，靠近边缘自动滚动；面板切换与弹窗进出延续一致的过渡节奏。每一次移动都有回应，每一个落点都清楚可见。
+- **精心调试的交互动画。** 拖动页面时相邻卡片自然让位，插入位置随光标实时呈现，靠近边缘自动滚动；面板与弹窗延续一致的过渡节奏。每一次移动都有回应，每一个落点都清楚可见。
 - **从阅读到编排，一气呵成。** 缩略图导航与页面总览自由切换，支持拖动排序、旋转、删除及撤销重做；把图片或另一个 PDF 拖入指定位置，即可接入当前文档。
-- **中文界面，完整输出。** 支持 Markdown、JPG、PNG 导出，以及 PDF 整理与纯图压缩；图片以 72 DPI 为 1×，可选更高倍率，并在操作前查看尺寸或文件大小预估。
+- **中文界面，完整输出。** Markdown、JPG、PNG 导出，以及 PDF 整理与纯图压缩，在统一的操作面板中完成。
 
 ### 亮色模式 · 清透、轻盈、专注
 
-![Folio Flow 亮色阅读界面：浮动工具栏、页面缩略图导航与 PDF 阅读画布](docs/images/ui-light-reader.png)
+![Folio Flow 亮色阅读界面：浮动工具栏、页面缩略图与阅读画布](docs/images/ui-light-reader.png)
 
 ### 深色模式 · 深空灰中的清晰层次
 
@@ -28,312 +30,131 @@ Folio Flow 是一款基于 Rust 的 Windows PDF 阅读与页面编辑工具。�
 
 截图展示实际运行界面；示例文档中的内容与商标归各自权利人所有。
 
-Rendering is [PDFium](https://pdfium.googlesource.com/pdfium/) (the engine in
-Chrome); the interface is [Iced](https://iced.rs) on the GPU.
+## 功能
 
-## What it does
+- **阅读与导航：** 连续滚动、10%–800% 缩放、适合宽度或整页、书签与页面缩略图、文档内链接及网页和邮件链接。
+- **搜索与复制：** 输入即搜索并高亮匹配，忽略大小写与重音，支持跨行词组和断词；拖动选择、双击选词、三击选行及复制全文。
+- **页面编辑：** 排序、旋转、删除、插页，支持撤销重做。排序复用缩略图，旋转仅刷新变化页，删除保留幸存页缓存。
+- **拖放插入：** 图片或 PDF 拖入导航栏、页面编排视图，按光标位置插入；PDF 插入全部页面，每次拖入一个文件。悬停预览位置，松手提交编辑。
+- **图片处理：** 支持 PNG、JPG、WebP、BMP、GIF、TIFF，按 72 DPI（1 像素 = 1 点）生成页面，读取 EXIF 方向，透明部分铺白。GIF/TIFF 使用首幅图像；导入不额外进行 JPEG 有损重压缩。
+- **导出：** Markdown、JPG、PNG。图片以 **72 DPI 为 1×**，可选 1×、1.5×、2×、3×，预览像素尺寸，每页单独输出到新文件夹。使用当前编辑后的页序与旋转。
+- **压缩：** 无损整理或纯图 PDF；纯图模式提供 72/144/216 DPI 与 JPEG 质量选项，通过抽样快速预估文件大小，并保存为副本。纯图 PDF 仅保留页面外观，移除文字层、链接、书签与表单数据。
+- **保存与打印：** 保存、另存为及未保存修改提醒；保存失败保留编辑结果。Windows 打印支持页码范围，使用当前编辑文档，文字和矢量图直接由 PDFium 绘制。
 
-- **Reading.** Continuous scroll, zoom from 10 % to 800 %, fit width / fit
-  page, outline and page-thumbnail sidebar, light and dark themes, drag and
-  drop to open.
-- **Searching.** Ctrl+F finds as you type, starting from where you are, and
-  highlights every match. Case and accents are ignored, a phrase is found
-  across a line break, and so is a word hyphenated over two lines.
-- **Links.** Click a link to go where it leads: a place in the document, or
-  a web page or mail address, which the browser or mail program opens.
-  Nothing else a document asks to have opened is. A web address that is
-  only written out in the text is a link too, whole even where it runs over
-  several lines.
-- **Copying.** Drag to select; double-click for a word, triple-click for a
-  line, Shift-click to extend, Ctrl+A for everything; Ctrl+C copies.
-- **Printing.** The Windows print dialog, with page ranges. Pages are drawn
-  onto the printer by PDFium directly, so text and vector art stay vector.
-- **Markdown export.** Headings (from font size and the document outline),
-  paragraphs with hyphenation undone, nested lists, bold / italic / inline
-  code, fenced code blocks, and tables; running headers, footers and page
-  numbers are dropped. Also available without the window:
-  `folio --export-markdown in.pdf out.md`.
-- **导出与压缩。** 导出窗口支持 Markdown、JPG、PNG；图片以 72 DPI
-  为 1×，可选 1.5×、2×、3×，每页单独输出到新文件夹。压缩窗口支持无损
-  整理及纯图 PDF；纯图模式提供 72/144/216 DPI 与 JPEG 质量选项，抽样预估
-  文件大小。纯图 PDF 仅保留页面外观，移除文字层、链接、书签和表单数据，
-  保存为副本。导出使用当前编辑后的页序和旋转。界面已中文化。
-- **Page editing.** A virtualized Organizer reorders, rotates, and deletes pages
-  with undo/redo; Ctrl+S saves and Ctrl+Shift+S saves a copy. Reordering keeps
-  existing thumbnails, rotation refreshes only changed pages, and deletion
-  keeps surviving thumbnails.
+Markdown 导出支持标题、段落、列表、粗斜体、代码与有线表格，并过滤重复页眉、页脚和页码。也可使用命令行：
 
-`folio --help` lists the command-line options.
+```powershell
+& '.\Folio Flow.exe' --export-markdown in.pdf out.md
+& '.\Folio Flow.exe' --help
+```
 
-## 本地增强版日常使用
+文件名前的圆点表示尚未保存。导入后移动或删除原文件不会破坏重做。PDF 拖到阅读画布时会打开为另一文档，未保存时先确认。
 
-- 拖入 PNG、JPG、WebP、BMP、GIF、TIFF 到页面导航栏或页面编排视图，
-  可按光标位置插入一页；拖入 PDF 则插入其中全部页面。每次拖入一个文件。
-  悬停显示插入位置并让位，靠近边缘自动滚动；松手才提交一次编辑。
-- 图片按 72 DPI（1 像素 = 1 点）生成页面；读取 EXIF 方向，透明部分铺白。
-  GIF/TIFF 使用首幅图像。导入使用无损像素嵌入，不额外做 JPEG 有损重压缩。
-- 插入后可旋转、排序、删除和撤销/重做；移动或删除导入文件不会破坏重做。
-  原文档的缩略图继续复用。文件名前的圆点表示尚未保存。
-- Ctrl+S 保存，Ctrl+Shift+S 另存为。关闭或打开另一文档前，会询问保存、
-  放弃或取消；保存失败会保留当前编辑结果。打印也包含尚未保存的页面编辑。
-- 拖到阅读画布而非页面导航栏的 PDF，维持“打开另一文档”的行为；未保存时先确认。
-- 运行包位于 `dist/Folio Flow/`，exe 与 pdfium.dll 应保持在同一文件夹。
+## 下载与运行
 
-当前仍不支持密码 PDF。重排、删除和插页采用 PDFium 页面导入，复杂文档的
-签名、表单、附件、命名目的地及物理书签结构保全仍有限制；纯图 PDF 则明确
-仅保留页面外观。此版本的真实系统拖拽手感、DPI 切换和最新 GUI 性能仍需实机确认。
+在 [GitHub Actions](https://github.com/kelsoz/Folio-Flow/actions/workflows/windows.yml) 中选择成功的运行，在页面底部的 **Artifacts（构建产物）** 下载 `Folio-Flow-Windows-x64`。登录 GitHub 后即可下载；构建包保留 30 天。
 
-## Installing
+解压后运行 **`Folio Flow.exe`**，请保留同目录的 `pdfium.dll` 和许可证文件。云端流程生成 Windows x64 便携包，不自动创建发行版或安装器。
 
-Run `Folio Flow-<version>-setup.exe`. It installs for the current user, so it does
-not ask for administrator rights, and adds a Start menu entry. Folio is added
-to the *Open with* list for PDF files; whichever program opens PDFs today
-keeps doing so until you choose Folio under Settings › Apps › Default apps.
-Uninstall from Settings › Apps › Installed apps.
+若自行生成安装器，运行 `Folio Flow-<version>-setup.exe`，无需管理员权限，支持 `/S` 静默安装。安装器添加开始菜单及 PDF 打开方式入口，不自动替换默认阅读器；可在 Windows 设置中卸载。程序未签名，Windows 可能显示 SmartScreen 提示。
 
-The installer is not code-signed, so Windows SmartScreen will warn on first
-run: choose *More info*, then *Run anyway*. `Folio Flow-<version>-setup.exe /S`
-installs silently.
+## 常用快捷键
 
-There is also a portable folder, `Folio Flow`, that runs from anywhere.
-
-## Shortcuts
-
-| | |
+| 操作 | 快捷键 |
 |---|---|
-| Open | Ctrl+O |
-| Save / Save as | Ctrl+S / Ctrl+Shift+S |
-| Undo / Redo | Ctrl+Z / Ctrl+Y or Ctrl+Shift+Z |
-| Rotate left / right | Ctrl+Shift+R / Ctrl+R |
-| Delete selected pages (Organizer) | Delete |
-| Print | Ctrl+P |
-| Export as Markdown | Ctrl+E |
-| Find | Ctrl+F |
-| Next / previous match | Enter / Shift+Enter, F3 / Shift+F3, or Ctrl+G / Ctrl+Shift+G |
-| Close the find bar | Esc |
-| Copy / Select all / Clear selection | Ctrl+C / Ctrl+A / Esc |
-| Zoom in / out / actual size | Ctrl++ / Ctrl+− / Ctrl+0, or Ctrl+wheel |
-| Reader: fit width / fit page | Ctrl+1 / Ctrl+2 |
-| Organizer: Reader / Organizer | Ctrl+1 / Ctrl+2 |
-| Toggle sidebar | Ctrl+B |
-| Scroll | wheel, arrows, PgUp / PgDn, Space, Home / End |
+| 打开 | Ctrl+O |
+| 保存 / 另存为 | Ctrl+S / Ctrl+Shift+S |
+| 撤销 / 重做 | Ctrl+Z / Ctrl+Y 或 Ctrl+Shift+Z |
+| 左旋 / 右旋 | Ctrl+Shift+R / Ctrl+R |
+| 删除选中页面（编排视图） | Delete |
+| 打印 | Ctrl+P |
+| 打开导出面板 | Ctrl+E |
+| 搜索 | Ctrl+F |
+| 下一个 / 上一个结果 | Enter / Shift+Enter，或 F3 / Shift+F3，或 Ctrl+G / Ctrl+Shift+G |
+| 关闭搜索栏 | Esc |
+| 复制 / 全选 / 清除选择 | Ctrl+C / Ctrl+A / Esc |
+| 放大 / 缩小 / 原始大小 | Ctrl++ / Ctrl+− / Ctrl+0；Ctrl+滚轮缩放 |
+| 阅读视图：适合宽度 / 整页 | Ctrl+1 / Ctrl+2 |
+| 编排视图：返回阅读 / 页面编排 | Ctrl+1 / Ctrl+2 |
+| 切换侧栏 | Ctrl+B |
+| 滚动 | 滚轮、方向键、PgUp / PgDn、空格、Home / End |
 
-## Building
+## 本地构建
 
-On Windows with PowerShell 7, build the canonical portable package:
+Rust 版本由 `rust-toolchain.toml` 指定。Windows 使用 PowerShell 7：
 
 ```powershell
 pwsh -File scripts/fetch-pdfium.ps1
+cargo fmt --check
+cargo test --locked -- --test-threads=1
+cargo clippy --locked --all-targets -- -D warnings
 pwsh -File scripts/build-windows.ps1
-& ".\dist\Folio Flow\Folio Flow.exe"
+& '.\dist\Folio Flow\Folio Flow.exe'
 ```
 
-The build script compiles Release, copies the runtime and licences, and verifies
-Markdown export with a path containing spaces. Output stays in `dist/Folio Flow/`.
-See [使用说明](docs/USAGE.zh-CN.md) and [开发说明](docs/DEVELOPMENT.md).
+构建脚本编译 Release，复制 PDFium 与许可证，并检查带空格路径下的 Markdown 导出。输出固定为 `dist/Folio Flow/`；Cargo 内部目标仍叫 `folio`。PDFium 在运行时加载，不随源码提交。
 
+推送到 `master` 自动触发云端检查、编译及打包，也可在工作流页面手动触发。
 
-PDFium is loaded at run time from next to the executable. Fetch the prebuilt
-library once (it is not checked in), then build as usual; the build script
-copies it into place.
-
-On Windows:
-
-```powershell
-.\scripts\fetch-pdfium.ps1
-cargo run --release -- path\to\file.pdf
-```
-
-On Linux or WSL (for development, and to cross-compile the Windows build):
+Linux / WSL 开发与交叉编译：
 
 ```sh
 ./scripts/fetch-pdfium.sh
-cargo run --release -- path/to/file.pdf      # native
-cargo test                                   # no GPU needed
-./scripts/package-windows.sh                 # -> dist/
+cargo run --release -- path/to/file.pdf
+cargo test
+./scripts/package-windows.sh
 ```
 
-`package-windows.sh` cross-compiles the release and produces both
-`dist/Folio Flow-<version>-setup.exe` and the portable `dist/Folio Flow/`.
-It needs [`cargo-xwin`](https://github.com/rust-cross/cargo-xwin) and
-[NSIS](https://nsis.sourceforge.io) (`apt install nsis`; on Debian/Ubuntu
-without root the script unpacks NSIS into `target/nsis` by itself). Set
-`PUBLISHER="Your Name"` to name a publisher in the installer. The installer
-is defined in `installer/folio.nsi`.
+交叉打包需要 [cargo-xwin](https://github.com/rust-cross/cargo-xwin) 和 [NSIS](https://nsis.sourceforge.io)，输出便携包及安装器。安装器定义在 `installer/folio.nsi`，可设置 `PUBLISHER` 指定发布者。修改 `assets/icon/folio.svg` 后，运行 `cargo run --example make-icon` 重新生成图标与安装器素材。
 
-The icon is drawn in `assets/icon/folio.svg`; after changing it, run
-`cargo run --example make-icon` to regenerate the `.ico`, the window icon and
-the installer artwork.
-`build.rs` links the `.ico` into `folio.exe` as its icon; it writes the
-resource file itself, so the cross-build needs no resource compiler.
+更多内容见 [使用说明](docs/USAGE.zh-CN.md) 与 [开发说明](docs/DEVELOPMENT.md)。
 
-The delivered executable is always **`Folio Flow.exe`**. Keep it beside `pdfium.dll`.
-Cargo keeps its internal `folio` target name; use `scripts/build-windows.ps1` to build and verify the named portable package.
+## 渲染与交互架构
 
-## How it stays fast
+渲染采用 Chrome 同源引擎 [PDFium](https://pdfium.googlesource.com/pdfium/)，界面由 [Iced](https://iced.rs) 驱动。
 
-- **One engine thread.** PDFium is not thread safe, so a single worker owns it
-  and the UI never waits on it. The UI publishes what the current view is
-  missing; that list is replaced on every scroll, so work for content that has
-  scrolled away is never started. What the engine produces is taken in a batch
-  per frame, so a burst of tiles redraws the interface once.
-- **The first page is rendered before there is a window.** Nearly all of
-  start-up is the graphics driver creating its device. The engine does not
-  wait for it: it is told the shape the view will have, and has the first
-  screen rendered some 30 ms after launch. The first frame that shows the
-  document shows it complete. Fonts are discovered on another thread in the
-  same interval.
-- **Tiles, not pages.** Pages are rendered in 510 px tiles at exactly the
-  device resolution, only where they intersect the viewport (plus a screenful
-  of prefetch in the direction of travel). Zooming to 800 % costs the same as
-  100 %. PDFium renders straight into the buffer that is handed to the GPU.
-- **Virtualised everything.** The page stack, outline, thumbnail list and
-  Organizer grid only build what is on screen; cost does not grow with document
-  length.
-- **Bounded memory.** Rendered tiles are kept for the view, its prefetch, and
-  half as much again for scrolling back: some twenty megabytes in a window of
-  ordinary size. Text layers and thumbnails live in small LRUs.
-  The file is read on demand, never loaded whole. PDFium itself keeps
-  everything it has parsed for as long as a document is open, so no handle on
-  the document is kept for long: searches and exports run through one of
-  their own that is closed afterwards, and the main one is traded for a fresh
-  one every hundred pages or so.
-- **Search reads a page once.** The text of every page searched is remembered
-  as search sees it, at about a byte a character. Later searches, which is to
-  say every keystroke after the first, only open the pages they will find
-  something on.
-- **Links come with the text.** A page's links are read once, with its text
-  layer, and only for pages on show; the addresses written in the text are
-  picked out of that layer in the same pass. Hovering and clicking are answered from
-  that on the UI thread, and nothing is drawn for them. On the book below
-  that is a few hundredths of a millisecond a page; a page of several hundred
-  links costs PDFium a few milliseconds to parse, once.
-- **Idle means idle.** The app owns one conditional animation-frame
-  subscription; sidebars and the Organizer only report motion. Once every
-  animation settles there are no timers or frame loops until the next input.
-- **One graphics backend.** On Windows the renderer is pinned to Direct3D 12
-  instead of probing Vulkan and OpenGL as well, which saves start-up time and
-  about 80 MB. Set `WGPU_BACKEND` to override; `gl` in particular is worth
-  trying, see below.
+- 单个工作线程持有 PDFium，按当前视口调度任务；过期请求及时替换，完成结果按帧批量接收。
+- 按视口渲染图块，页面列表、书签、缩略图与编排网格均采用虚拟化，避免一次性构建整份文档的界面。
+- 图块、文字层与缩略图使用缓存；文档回收、搜索、导出及打印保留当前尚未保存的编辑结果。
+- 统一管理按需动画帧，动画静止后停止订阅；搜索复用已提取文字，链接复用文字层数据。
+- Windows 默认使用 Direct3D 12，可通过 `WGPU_BACKEND` 覆盖后端。驱动与硬件会影响启动速度、内存和帧表现。
 
-**The figures below are historical upstream measurements, not current Folio Flow benchmarks.**
-
-Measured on Windows 11 (Ryzen 9 9950X3D, RTX 4090, 240 Hz display) with a
-501-page book, release build:
-
-| | |
-|---|---|
-| Launch to first page fully rendered | 0.35 s, of which 0.3 s is the graphics driver starting |
-| First screen rendered by the engine | 30 ms after launch |
-| Rendering | 0.66 ms per tile, 250 megapixels a second |
-| Continuous scrolling | steady at the display's 240 Hz, 4.5 ms p95 frame interval, no frame with a tile missing |
-| First search of the whole book | 0.28 s, with matches shown as they are found, from the page being read |
-| Later searches | 6 ms for a phrase that is not there, 47 ms for a word found 174 times, 0.27 s for one on nearly every page |
-| Markdown export of all 501 pages | 0.42 s |
-| Memory with the book open | 120 MB working set, 98 MB of it the window and the graphics driver |
-| Memory after scrolling through 40 pages | 140 MB |
-| Memory of the engine alone, after searching the whole book | 18 MB |
-| Threads | 23 |
-| CPU while idle | 0 |
-| `folio.exe` | 10 MB |
-
-The graphics driver is what the two headline numbers are made of, and it is
-the one part that differs from machine to machine: an empty window is 98 MB
-and 0.3 s of the figures above.
-
-### A faster start on OpenGL
-
-`WGPU_BACKEND=gl` runs the same renderer on OpenGL, and draws the same
-pixels. On the machine above its driver is ready in a third of the time:
-
-| | Direct3D 12 | OpenGL |
-|---|---|---|
-| Launch to first page fully rendered | 0.35 s | 0.17 s |
-| Memory with the book open | 120 MB working set, 76 MB of it private (Task Manager's figure) | 90 MB, 54 MB private |
-| Memory after scrolling through 40 pages | 140 MB | 113 MB |
-| Processor time while scrolling at 240 Hz | 16 % of a core | 48 % of a core |
-| Threads | 23 | 18 |
-
-It is not the default for two reasons. It has been measured on that one
-NVIDIA card, and OpenGL drivers vary more between makers than Direct3D ones
-do. And it costs three times the processor while scrolling, most of it on the
-driver's own threads, with one hitch of 20 ms on the first scroll after
-launch. Folio already does what it can about the first: left to wait for the
-display itself, the driver spins a core, so on OpenGL frames are presented at
-once and paced against the compositor instead (`src/graphics.rs`).
-
-### Measuring it
-
-Three undocumented switches produce the numbers above:
+原版的历史性能数据见 [上游项目](https://github.com/Dethon/folio)，不代表当前 Folio Flow 的性能。诊断入口保留如下（Shell 环境变量语法因平台而异）：
 
 ```sh
-FOLIO_TRACE=trace.txt folio book.pdf --screenshot shot.png   # start-up timeline, memory once settled
-FOLIO_TRACE=trace.txt folio book.pdf --scroll-test 1500      # frame intervals over 1500 frames of scrolling
-folio --bench book.pdf                                       # the engine alone: open, render, text, search
+FOLIO_TRACE=trace.txt folio book.pdf --screenshot shot.png
+FOLIO_TRACE=trace.txt folio book.pdf --scroll-test 1500
+folio --bench book.pdf
 ```
 
-`FOLIO_TRACE` names a file that the timeline is appended to, in milliseconds
-since the process was created. Adding `FOLIO_TRACE_LOG=1` includes what the
-windowing and graphics libraries log, which is how the start-up time was
-attributed, at some cost to the timings themselves.
+`FOLIO_TRACE` 记录启动时间线；`FOLIO_TRACE_LOG=1` 额外记录窗口与图形库日志，会影响测量开销。
 
-## Layout
+## 源码导览
 
-```
-src/
-  main.rs            command line
-  graphics.rs        choice of graphics backend, frame pacing on OpenGL
-  app.rs             state, messages, update loop
-  trace.rs           start-up timeline and memory report (FOLIO_TRACE)
-  bench.rs           engine benchmark (--bench)
-  web.rs             opening web and mail links, and nothing else
-  engine/            no UI dependencies
-    mod.rs           Engine handle, events, work queue
-    worker.rs        the PDFium thread: rendering, text extraction, jobs
-    text.rs          text layer and links, hit testing, selection ranges
-    markdown.rs      structure inference and Markdown output
-    table.rs         table detection from ruling lines
-    print.rs         Windows print dialog and device rendering
-  motion.rs         springs, tweens and shared motion state
-  ui/
-    viewer.rs        page view: layout, scrolling, zoom, tile cache, selection
-    sidebar.rs       outline and thumbnails
-    organizer.rs     virtualized page grid and drag preview
-    order.rs         stable source PageId and edit history
-    chrome.rs        floating toolbars and window controls
-    theme.rs         colour tokens and widget styles
-    icon.rs          Lucide icons, rasterised at the size they are shown
-installer/folio.nsi  Windows installer (NSIS)
-examples/make-icon.rs  renders the icon artwork to .ico / .png / .bmp
-```
+| 路径 | 职责 |
+|---|---|
+| `src/main.rs`、`src/app.rs` | 命令行、应用状态、消息与更新 |
+| `src/graphics.rs`、`src/trace.rs`、`src/bench.rs` | 图形后端、诊断与性能测量 |
+| `src/engine/` | PDFium 工作线程、文字、链接、Markdown、表格、图片与打印 |
+| `src/motion.rs` | 弹簧、补间与共享动效状态 |
+| `src/ui/viewer.rs`、`sidebar.rs`、`organizer.rs` | 阅读、导航与页面编排 |
+| `src/ui/order.rs` | 稳定页面身份与编辑历史 |
+| `src/ui/chrome.rs`、`dialog.rs`、`theme.rs`、`icon.rs` | 工具栏、弹窗、主题与图标 |
+| `src/web.rs` | 网页与邮件链接打开 |
+| `scripts/`、`installer/` | 构建、打包与安装器 |
 
-## Not there yet
+## 当前限制
 
-- Password-protected documents.
-- There is no going back to where a link was followed from, and links into
-  other files are not followed. An address written in the text is only
-  joined across a line break when the line is full and what follows could
-  only be more of it, so one broken in the middle of a plain word stops
-  there.
-- Search matches whole text only: no whole-word or regular-expression
-  options, a phrase split across two pages is not found, and it stops
-  counting at 20,000 matches.
-- Annotations and form filling (annotations are displayed, not editable).
-- Markdown export only recognises tables that are drawn: a grid, or the
-  horizontal rules of a typeset table. Tables laid out by spacing alone stay
-  as text, since they cannot be told from columns of prose. Merged cells are
-  flattened (Markdown has none), a table continuing onto the next page
-  becomes two tables, and images are not extracted.
-- Printing outside Windows hands the whole file to `lp`.
-- The installer is unsigned.
+- 不支持密码 PDF、批注编辑或表单填写；已有批注可显示。
+- 页面导入重建对复杂文档的签名、表单、附件、命名目的地及物理书签结构保全有限制；纯图 PDF 仅保留外观。
+- 链接导航没有返回历史，不跟随其他文件链接；跨行纯文本网址的识别存在边界。
+- 搜索没有整词或正则选项，不跨页匹配，最多计数 20,000 个结果。
+- Markdown 表格识别依赖表格线，合并单元格会展开，跨页表格分别输出；不提取图片，不对扫描件自动 OCR。
+- 非 Windows 打印交给 `lp`。程序与安装器未签名。
+- 真实系统拖放手感、DPI 切换与最新 GUI 性能仍需实机确认。
 
-## Licence
+## 许可证与致谢
 
-Folio is released under the [MIT licence](LICENSE).
+基于 [Folio](https://github.com/Dethon/folio) 开发，保留原作者署名与 [MIT 许可证](LICENSE)。
 
-## Credits
-
-PDFium (BSD-3-Clause / Apache-2.0), binaries from
-[bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries);
-[pdfium-render](https://github.com/ajrcarey/pdfium-render); Iced (MIT);
-[Lucide](https://lucide.dev) icons (ISC).
+感谢 PDFium（BSD-3-Clause / Apache-2.0）、[bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries)、[pdfium-render](https://github.com/ajrcarey/pdfium-render)、Iced（MIT）和 [Lucide](https://lucide.dev) 图标（ISC）。

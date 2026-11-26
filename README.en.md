@@ -52,9 +52,9 @@ A dot before the filename indicates unsaved changes. Moving or deleting an impor
 
 ## Download and run
 
-Open a successful [GitHub Actions run](https://github.com/kelsoz/Folio-Flow/actions/workflows/windows.yml) and download `Folio-Flow-Windows-x64` from **Artifacts** at the bottom. Downloads require a GitHub login; artifacts are retained for 30 days.
+Visit [GitHub Releases](https://github.com/kelsoz/Folio-Flow/releases/latest) and download the latest `Folio-Flow-…-Windows-x64.zip`. Every push to `master` publishes a new release after cloud checks pass. Release assets are not subject to the 30-day Actions artifact retention period.
 
-Extract the package and run **`Folio Flow.exe`**. Keep `pdfium.dll` and the license files beside it. The cloud workflow produces a Windows x64 portable package; it does not automatically publish releases or installers.
+Extract the package and run **`Folio Flow.exe`**. Keep `pdfium.dll` and the license files beside it. The cloud workflow publishes a Windows x64 portable package and SHA-256 checksum; it does not generate an installer.
 
 If you build an installer, run `Folio Flow-<version>-setup.exe`. It installs for the current user without administrator privileges and supports `/S` for silent installation. It adds Start menu and PDF “Open with” entries without changing the default reader. Uninstall through Windows Settings. The app is unsigned and may trigger a SmartScreen warning.
 
@@ -94,7 +94,7 @@ pwsh -File scripts/build-windows.ps1
 
 The script builds Release, copies PDFium and licenses, and checks Markdown export with paths containing spaces. Output is always `dist/Folio Flow/`; the internal Cargo target remains `folio`. PDFium is loaded at runtime and is not committed with the source.
 
-Pushes to `master` trigger cloud checks, compilation, and packaging. The workflow also supports manual runs.
+Pushes to `master` trigger cloud checks, compilation, and Release publication. Manual runs are also supported. Tags use `v<package-version>-build.<run-number>.<attempt-number>` to preserve release history. Failed builds do not publish a public release.
 
 Linux / WSL development and cross-compilation:
 

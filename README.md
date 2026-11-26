@@ -52,9 +52,9 @@ Markdown 导出支持标题、段落、列表、粗斜体、代码与有线表�
 
 ## 下载与运行
 
-在 [GitHub Actions](https://github.com/kelsoz/Folio-Flow/actions/workflows/windows.yml) 中选择成功的运行，在页面底部的 **Artifacts（构建产物）** 下载 `Folio-Flow-Windows-x64`。登录 GitHub 后即可下载；构建包保留 30 天。
+前往 [GitHub Releases](https://github.com/kelsoz/Folio-Flow/releases/latest)，下载最新版本的 `Folio-Flow-…-Windows-x64.zip`。每次推送到 `master`，通过云端检查后都会自动发布一个新版本；Release 附件不受 Actions 构建产物 30 天保留期限影响。
 
-解压后运行 **`Folio Flow.exe`**，请保留同目录的 `pdfium.dll` 和许可证文件。云端流程生成 Windows x64 便携包，不自动创建发行版或安装器。
+解压后运行 **`Folio Flow.exe`**，请保留同目录的 `pdfium.dll` 和许可证文件。云端流程发布 Windows x64 便携包和 SHA-256 校验文件，不生成安装器。
 
 若自行生成安装器，运行 `Folio Flow-<version>-setup.exe`，无需管理员权限，支持 `/S` 静默安装。安装器添加开始菜单及 PDF 打开方式入口，不自动替换默认阅读器；可在 Windows 设置中卸载。程序未签名，Windows 可能显示 SmartScreen 提示。
 
@@ -94,7 +94,7 @@ pwsh -File scripts/build-windows.ps1
 
 构建脚本编译 Release，复制 PDFium 与许可证，并检查带空格路径下的 Markdown 导出。输出固定为 `dist/Folio Flow/`；Cargo 内部目标仍叫 `folio`。PDFium 在运行时加载，不随源码提交。
 
-推送到 `master` 自动触发云端检查、编译及打包，也可在工作流页面手动触发。
+推送到 `master` 自动触发云端检查、编译及 Release 发布，也可在工作流页面手动触发。版本标签采用 `v<软件版本>-build.<运行编号>.<重试编号>`，避免覆盖历史版本；构建失败不会发布正式版本。
 
 Linux / WSL 开发与交叉编译：
 

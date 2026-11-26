@@ -1,7 +1,8 @@
-# Folio
+# Folio Flow
 
-A fast, minimal PDF reader for Windows, written in Rust. It reads, searches,
-copies text, prints, and exports to Markdown — and nothing else.
+A fast, minimal PDF reader and page editor for Windows, written in Rust. It
+reads, searches, copies text, prints, exports to Markdown, and edits page order,
+rotation, and deletion.
 
 Rendering is [PDFium](https://pdfium.googlesource.com/pdfium/) (the engine in
 Chrome); the interface is [Iced](https://iced.rs) on the GPU.
@@ -28,28 +29,59 @@ Chrome); the interface is [Iced](https://iced.rs) on the GPU.
   code, fenced code blocks, and tables; running headers, footers and page
   numbers are dropped. Also available without the window:
   `folio --export-markdown in.pdf out.md`.
+- **导出与压缩。** 导出窗口支持 Markdown、JPG、PNG；图片以 72 DPI
+  为 1×，可选 1.5×、2×、3×，每页单独输出到新文件夹。压缩窗口支持无损
+  整理及纯图 PDF；纯图模式提供 72/144/216 DPI 与 JPEG 质量选项，抽样预估
+  文件大小。纯图 PDF 仅保留页面外观，移除文字层、链接、书签和表单数据，
+  保存为副本。导出使用当前编辑后的页序和旋转。界面已中文化。
+- **Page editing.** A virtualized Organizer reorders, rotates, and deletes pages
+  with undo/redo; Ctrl+S saves and Ctrl+Shift+S saves a copy. Reordering keeps
+  existing thumbnails, rotation refreshes only changed pages, and deletion
+  keeps surviving thumbnails.
 
 `folio --help` lists the command-line options.
 
+## 本地增强版日常使用
+
+- 拖入 PNG、JPG、WebP、BMP、GIF、TIFF 到页面导航栏或页面编排视图，
+  可按光标位置插入一页；拖入 PDF 则插入其中全部页面。每次拖入一个文件。
+  悬停显示插入位置并让位，靠近边缘自动滚动；松手才提交一次编辑。
+- 图片按 72 DPI（1 像素 = 1 点）生成页面；读取 EXIF 方向，透明部分铺白。
+  GIF/TIFF 使用首幅图像。导入使用无损像素嵌入，不额外做 JPEG 有损重压缩。
+- 插入后可旋转、排序、删除和撤销/重做；移动或删除导入文件不会破坏重做。
+  原文档的缩略图继续复用。文件名前的圆点表示尚未保存。
+- Ctrl+S 保存，Ctrl+Shift+S 另存为。关闭或打开另一文档前，会询问保存、
+  放弃或取消；保存失败会保留当前编辑结果。打印也包含尚未保存的页面编辑。
+- 拖到阅读画布而非页面导航栏的 PDF，维持“打开另一文档”的行为；未保存时先确认。
+- 运行包位于 `dist/Folio Flow/`，exe 与 pdfium.dll 应保持在同一文件夹。
+
+当前仍不支持密码 PDF。重排、删除和插页采用 PDFium 页面导入，复杂文档的
+签名、表单、附件、命名目的地及物理书签结构保全仍有限制；纯图 PDF 则明确
+仅保留页面外观。此版本的真实系统拖拽手感、DPI 切换和最新 GUI 性能仍需实机确认。
+
 ## Installing
 
-Run `Folio-<version>-setup.exe`. It installs for the current user, so it does
+Run `Folio Flow-<version>-setup.exe`. It installs for the current user, so it does
 not ask for administrator rights, and adds a Start menu entry. Folio is added
 to the *Open with* list for PDF files; whichever program opens PDFs today
 keeps doing so until you choose Folio under Settings › Apps › Default apps.
 Uninstall from Settings › Apps › Installed apps.
 
 The installer is not code-signed, so Windows SmartScreen will warn on first
-run: choose *More info*, then *Run anyway*. `Folio-<version>-setup.exe /S`
+run: choose *More info*, then *Run anyway*. `Folio Flow-<version>-setup.exe /S`
 installs silently.
 
-There is also a portable folder, `folio-windows-x64`, that runs from anywhere.
+There is also a portable folder, `Folio Flow`, that runs from anywhere.
 
 ## Shortcuts
 
 | | |
 |---|---|
 | Open | Ctrl+O |
+| Save / Save as | Ctrl+S / Ctrl+Shift+S |
+| Undo / Redo | Ctrl+Z / Ctrl+Y or Ctrl+Shift+Z |
+| Rotate left / right | Ctrl+Shift+R / Ctrl+R |
+| Delete selected pages (Organizer) | Delete |
 | Print | Ctrl+P |
 | Export as Markdown | Ctrl+E |
 | Find | Ctrl+F |
@@ -57,11 +89,25 @@ There is also a portable folder, `folio-windows-x64`, that runs from anywhere.
 | Close the find bar | Esc |
 | Copy / Select all / Clear selection | Ctrl+C / Ctrl+A / Esc |
 | Zoom in / out / actual size | Ctrl++ / Ctrl+− / Ctrl+0, or Ctrl+wheel |
-| Fit width / fit page | Ctrl+1 / Ctrl+2 |
+| Reader: fit width / fit page | Ctrl+1 / Ctrl+2 |
+| Organizer: Reader / Organizer | Ctrl+1 / Ctrl+2 |
 | Toggle sidebar | Ctrl+B |
 | Scroll | wheel, arrows, PgUp / PgDn, Space, Home / End |
 
 ## Building
+
+On Windows with PowerShell 7, build the canonical portable package:
+
+```powershell
+pwsh -File scripts/fetch-pdfium.ps1
+pwsh -File scripts/build-windows.ps1
+& ".\dist\Folio Flow\Folio Flow.exe"
+```
+
+The build script compiles Release, copies the runtime and licences, and verifies
+Markdown export with a path containing spaces. Output stays in `dist/Folio Flow/`.
+See [使用说明](docs/USAGE.zh-CN.md) and [开发说明](docs/DEVELOPMENT.md).
+
 
 PDFium is loaded at run time from next to the executable. Fetch the prebuilt
 library once (it is not checked in), then build as usual; the build script
@@ -84,7 +130,7 @@ cargo test                                   # no GPU needed
 ```
 
 `package-windows.sh` cross-compiles the release and produces both
-`dist/Folio-<version>-setup.exe` and the portable `dist/folio-windows-x64/`.
+`dist/Folio Flow-<version>-setup.exe` and the portable `dist/Folio Flow/`.
 It needs [`cargo-xwin`](https://github.com/rust-cross/cargo-xwin) and
 [NSIS](https://nsis.sourceforge.io) (`apt install nsis`; on Debian/Ubuntu
 without root the script unpacks NSIS into `target/nsis` by itself). Set
@@ -97,7 +143,8 @@ the installer artwork.
 `build.rs` links the `.ico` into `folio.exe` as its icon; it writes the
 resource file itself, so the cross-build needs no resource compiler.
 
-However it is shipped, `folio.exe` and `pdfium.dll` must stay together.
+The delivered executable is always **`Folio Flow.exe`**. Keep it beside `pdfium.dll`.
+Cargo keeps its internal `folio` target name; use `scripts/build-windows.ps1` to build and verify the named portable package.
 
 ## How it stays fast
 
@@ -116,8 +163,9 @@ However it is shipped, `folio.exe` and `pdfium.dll` must stay together.
   device resolution, only where they intersect the viewport (plus a screenful
   of prefetch in the direction of travel). Zooming to 800 % costs the same as
   100 %. PDFium renders straight into the buffer that is handed to the GPU.
-- **Virtualised everything.** The page stack, the outline and the thumbnail
-  list only build what is on screen; cost does not grow with document length.
+- **Virtualised everything.** The page stack, outline, thumbnail list and
+  Organizer grid only build what is on screen; cost does not grow with document
+  length.
 - **Bounded memory.** Rendered tiles are kept for the view, its prefetch, and
   half as much again for scrolling back: some twenty megabytes in a window of
   ordinary size. Text layers and thumbnails live in small LRUs.
@@ -136,12 +184,15 @@ However it is shipped, `folio.exe` and `pdfium.dll` must stay together.
   that on the UI thread, and nothing is drawn for them. On the book below
   that is a few hundredths of a millisecond a page; a page of several hundred
   links costs PDFium a few milliseconds to parse, once.
-- **Idle means idle.** There are no timers or animation loops; nothing runs
-  until there is input.
+- **Idle means idle.** The app owns one conditional animation-frame
+  subscription; sidebars and the Organizer only report motion. Once every
+  animation settles there are no timers or frame loops until the next input.
 - **One graphics backend.** On Windows the renderer is pinned to Direct3D 12
   instead of probing Vulkan and OpenGL as well, which saves start-up time and
   about 80 MB. Set `WGPU_BACKEND` to override; `gl` in particular is worth
   trying, see below.
+
+**The figures below are historical upstream measurements, not current Folio Flow benchmarks.**
 
 Measured on Windows 11 (Ryzen 9 9950X3D, RTX 4090, 240 Hz display) with a
 501-page book, release build:
@@ -219,9 +270,13 @@ src/
     markdown.rs      structure inference and Markdown output
     table.rs         table detection from ruling lines
     print.rs         Windows print dialog and device rendering
+  motion.rs         springs, tweens and shared motion state
   ui/
     viewer.rs        page view: layout, scrolling, zoom, tile cache, selection
     sidebar.rs       outline and thumbnails
+    organizer.rs     virtualized page grid and drag preview
+    order.rs         stable source PageId and edit history
+    chrome.rs        floating toolbars and window controls
     theme.rs         colour tokens and widget styles
     icon.rs          Lucide icons, rasterised at the size they are shown
 installer/folio.nsi  Windows installer (NSIS)

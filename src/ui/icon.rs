@@ -42,22 +42,30 @@ macro_rules! icons {
 icons! {
     Sidebar => "panel-left",
     Open => "folder-open",
-    ZoomOut => "minus",
-    ZoomIn => "plus",
     Print => "printer",
     Export => "file-down",
     Sun => "sun",
     Moon => "moon",
     ChevronRight => "chevron-right",
     ChevronDown => "chevron-down",
-    Outline => "list-tree",
-    Pages => "gallery-vertical",
     FitWidth => "move-horizontal",
     FitPage => "move-vertical",
     Document => "file-text",
     Close => "x",
     Search => "search",
     ChevronUp => "chevron-up",
+    Organizer => "layout-grid",
+    Undo => "undo-2",
+    Redo => "redo-2",
+    RotateLeft => "rotate-ccw",
+    RotateRight => "rotate-cw",
+    Extract => "scissors",
+    Delete => "trash-2",
+    More => "ellipsis",
+    Minimize => "minimize",
+    Maximize => "maximize",
+    Restore => "restore",
+    Compress => "file-archive",
 }
 
 /// Device pixels per logical pixel, as `f32` bits. Widgets are not told the
@@ -178,6 +186,24 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for View {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::theme::PAPER;
+
+    #[test]
+    fn minimize_artwork_is_vertically_centered() {
+        let handle = Icon::Minimize.raster(24, PAPER).expect("icon renders");
+        let image::Handle::Rgba { pixels, .. } = handle else {
+            panic!("expected pixels");
+        };
+        let rows: Vec<usize> = pixels
+            .chunks_exact(4)
+            .enumerate()
+            .filter(|(_, pixel)| pixel[3] > 0)
+            .map(|(index, _)| index / 24)
+            .collect();
+        let center = (*rows.iter().min().unwrap() + *rows.iter().max().unwrap()) as f32 / 2.0;
+
+        assert!((11.0..=13.0).contains(&center));
+    }
 
     #[test]
     fn rasterises_in_the_colour_asked_for() {

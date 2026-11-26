@@ -1,5 +1,8 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use pdfium_render::prelude::*;
@@ -9,9 +12,9 @@ use crate::trace;
 use super::table::Rule;
 use super::text::{self, Glyph, LINK_LIMIT, Rect, URI_LIMIT};
 use super::{
-    Bitmap, CopyRequest, DocInfo, Event, Job, JobKind, Link, MATCH_LIMIT, Match, Open, OutlineItem,
-    PageSize, PageText, SearchRequest, Shared, THUMBNAIL_WIDTH, TILE, Target, TileKey, Wanted,
-    markdown, page_pixels, print,
+    Bitmap, CopyRequest, DocInfo, EditRequest, Event, ImportRequest, Job, JobKind, Link,
+    MATCH_LIMIT, Match, Open, OutlineItem, PageSize, PageText, SearchRequest, Shared,
+    THUMBNAIL_WIDTH, TILE, Target, TileKey, Wanted, markdown, page_pixels, print, raster,
 };
 
 type Emit = Box<dyn Fn(Event) + Send>;
@@ -42,6 +45,11 @@ const SEARCH_STRIDE: u32 = 256;
 /// there are several, as in the tests: without it they parse over each other
 /// and documents come back missing pages, text or outline.
 static EXCLUSIVE: Mutex<()> = Mutex::new(());
+static NEXT_DOCUMENT: AtomicU64 = AtomicU64::new(1);
+
+fn next_document_id() -> u64 {
+    NEXT_DOCUMENT.fetch_add(1, Ordering::Relaxed)
+}
 
 fn exclusive() -> MutexGuard<'static, ()> {
     // There is nothing behind the lock for a panic to have left half done.
@@ -54,8 +62,6 @@ pub(crate) fn run(shared: Arc<Shared>, emit: Emit) {
 
         pdfium()
     };
-    let mut next_id = 1u64;
-
     trace::mark("engine: pdfium bound");
 
     loop {
@@ -77,9 +83,12 @@ pub(crate) fn run(shared: Arc<Shared>, emit: Emit) {
         let opened = {
             let _exclusive = exclusive();
 
-            pdfium
-                .load_pdf_from_file(&path, None)
-                .map(|document| (Arc::new(describe(&document, next_id, &path)), document))
+            pdfium.load_pdf_from_file(&path, None).map(|document| {
+                (
+                    Arc::new(describe(&document, next_document_id(), &path)),
+                    document,
+                )
+            })
         };
 
         let (info, document) = match opened {
@@ -92,8 +101,6 @@ pub(crate) fn run(shared: Arc<Shared>, emit: Emit) {
                 continue;
             }
         };
-
-        next_id += 1;
 
         trace::mark("engine: document described");
 
@@ -116,9 +123,13 @@ pub(crate) fn run(shared: Arc<Shared>, emit: Emit) {
             pdfium,
             pages: VecDeque::new(),
             document,
+            source_baseline: None,
+            modified: false,
             parsed: 0,
             scratch: None,
             haystacks: (0..info.pages.len()).map(|_| None).collect(),
+            source_outline: info.outline.clone(),
+            source_title: info.title.clone(),
             info,
             shared: &shared,
             emit: &emit,
@@ -190,6 +201,8 @@ fn next_open(shared: &Shared) -> Option<Open> {
         queue.wanted = Wanted::default();
         queue.copy = None;
         queue.search = None;
+        queue.edit = None;
+        queue.import = None;
         queue.jobs.clear();
 
         queue = shared.wake.wait(queue).ok()?;
@@ -199,10 +212,10 @@ fn next_open(shared: &Shared) -> Option<Open> {
 fn describe_open_error(error: &PdfiumError) -> String {
     match error {
         PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::PasswordError) => {
-            "This document is password protected.".into()
+            "此文档有密码保护。".into()
         }
         PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::FormatError) => {
-            "This file is not a valid PDF, or it is damaged.".into()
+            "此文件不是有效的 PDF，或已损坏。".into()
         }
         PdfiumError::IoError(error) => error.to_string(),
         other => format!("{other:?}"),
@@ -293,6 +306,8 @@ enum Task {
     CopyStep,
     Search(SearchRequest),
     SearchStep,
+    Edit(EditRequest),
+    Import(ImportRequest),
     Start(Job),
     Step,
 }
@@ -312,20 +327,49 @@ struct Search {
     found: usize,
 }
 
-enum Active {
+enum Active<'p> {
+    Raster {
+        dest: PathBuf,
+        settings: raster::Settings,
+        page: u32,
+        output: raster::Output<'p>,
+    },
+    Estimate {
+        request: u64,
+        settings: raster::Settings,
+        samples: Vec<u32>,
+        done: usize,
+        bytes: u64,
+        area: f64,
+    },
     Export {
         dest: PathBuf,
         page: u32,
         pages: Vec<markdown::Page>,
     },
     Print(print::Session),
+    Save {
+        dest: PathBuf,
+    },
+    Extract {
+        dest: PathBuf,
+        total: u32,
+        output: PdfDocument<'p>,
+    },
+    Compact {
+        dest: PathBuf,
+    },
 }
 
-impl Active {
+impl Active<'_> {
     fn kind(&self) -> JobKind {
         match self {
+            Active::Raster { .. } | Active::Estimate { .. } => JobKind::Raster,
             Active::Export { .. } => JobKind::Export,
             Active::Print(_) => JobKind::Print,
+            Active::Save { .. } => JobKind::Save,
+            Active::Extract { .. } => JobKind::Extract,
+            Active::Compact { .. } => JobKind::Compact,
         }
     }
 }
@@ -340,6 +384,8 @@ struct Session<'s, 'p> {
     /// than the file itself. So no handle is kept for long: this one is
     /// traded for a fresh one every [`RECYCLE_AFTER`] pages.
     document: PdfDocument<'p>,
+    source_baseline: Option<PdfDocument<'p>>,
+    modified: bool,
     /// Pages parsed through `document` since it was opened.
     parsed: u32,
     /// A second handle on the file, for work that walks the whole document.
@@ -347,6 +393,8 @@ struct Session<'s, 'p> {
     scratch: Option<PdfDocument<'p>>,
     /// The text of each page searched so far, as search sees it.
     haystacks: Vec<Option<text::Haystack>>,
+    source_outline: Vec<OutlineItem>,
+    source_title: String,
     info: Arc<DocInfo>,
     shared: &'s Shared,
     emit: &'s Emit,
@@ -356,7 +404,7 @@ struct Session<'s, 'p> {
     tiles_sent: u64,
     copy: Option<Copy>,
     search: Option<Search>,
-    job: Option<Active>,
+    job: Option<Active<'p>>,
 }
 
 impl<'p> Session<'_, 'p> {
@@ -411,6 +459,13 @@ impl<'p> Session<'_, 'p> {
                         break Task::Step;
                     }
 
+                    if let Some(import) = queue.import.take() {
+                        break Task::Import(import);
+                    }
+                    if let Some(edit) = queue.edit.take() {
+                        break Task::Edit(edit);
+                    }
+
                     if let Some(job) = queue.jobs.pop_front() {
                         break Task::Start(job);
                     }
@@ -457,6 +512,8 @@ impl<'p> Session<'_, 'p> {
                     });
                 }
                 Task::SearchStep => self.search_step(),
+                Task::Edit(edit) => self.apply_edit(edit),
+                Task::Import(import) => self.import_pages(import),
                 Task::Start(job) => self.start(job),
                 Task::Step => self.step(),
             }
@@ -492,7 +549,14 @@ impl<'p> Session<'_, 'p> {
 
         // Should the file have gone, or been replaced by another, since it
         // was opened, the handle that has it open carries on.
-        if let Ok(fresh) = self.pdfium.load_pdf_from_file(&self.info.path, None)
+        let fresh = if self.modified {
+            self.document
+                .save_to_bytes()
+                .and_then(|bytes| self.pdfium.load_pdf_from_byte_vec(bytes, None))
+        } else {
+            self.pdfium.load_pdf_from_file(&self.info.path, None)
+        };
+        if let Ok(fresh) = fresh
             && fresh.pages().len() as usize == self.info.pages.len()
         {
             self.pages.clear();
@@ -508,7 +572,7 @@ impl<'p> Session<'_, 'p> {
             return Some(f(page));
         }
 
-        if self.scratch.is_none() {
+        if !self.modified && self.scratch.is_none() {
             self.scratch = self
                 .pdfium
                 .load_pdf_from_file(&self.info.path, None)
@@ -661,16 +725,346 @@ impl<'p> Session<'_, 'p> {
         }
     }
 
+    fn saved_info(&self, path: &Path) -> DocInfo {
+        let mut info = describe(&self.document, self.info.id, path);
+        info.title = self.info.title.clone();
+        info.outline = self.info.outline.clone();
+        info
+    }
+
+    fn reset_document_state(&mut self, page_count: usize) {
+        self.pages.clear();
+        self.scratch = None;
+        self.parsed = 0;
+        self.sent.clear();
+        self.haystacks = (0..page_count).map(|_| None).collect();
+    }
+
+    fn replace_document(&mut self, temp: &Path, dest: &Path) -> Result<(), String> {
+        let recovery = self.document.save_to_bytes().map_err(|e| e.to_string())?;
+        self.pages.clear();
+        self.scratch = None;
+
+        let placeholder = match self.pdfium.create_new_pdf() {
+            Ok(document) => document,
+            Err(error) => {
+                let _ = fs::remove_file(temp);
+                return Err(format!("无法关闭先前的 PDF：{error}"));
+            }
+        };
+        let previous = std::mem::replace(&mut self.document, placeholder);
+        drop(previous);
+
+        if let Err(error) = publish_save(temp, dest) {
+            self.document = self
+                .pdfium
+                .load_pdf_from_byte_vec(recovery, None)
+                .map_err(|e| {
+                    format!(
+                        "保存失败，无法恢复编辑内容：{e}；临时副本位于 {}",
+                        temp.display()
+                    )
+                })?;
+            self.reset_document_state(self.info.pages.len());
+            let _ = fs::remove_file(temp);
+            return Err(error);
+        }
+
+        self.document = self
+            .pdfium
+            .load_pdf_from_file(dest, None)
+            .or_else(|_| self.pdfium.load_pdf_from_byte_vec(recovery, None))
+            .map_err(|error| format!("无法重新打开保存后的 PDF：{error}"))?;
+        self.reset_document_state(self.info.pages.len());
+        Ok(())
+    }
+
+    fn save_current(&mut self, dest: PathBuf) -> Result<Arc<DocInfo>, String> {
+        if dest != self.info.path {
+            atomic_save(&self.document, &dest)?;
+            let info = Arc::new(self.saved_info(&dest));
+            self.source_outline = info.outline.clone();
+            self.source_title = info.title.clone();
+            self.info = info.clone();
+            self.source_baseline = None;
+            self.modified = false;
+            return Ok(info);
+        }
+
+        let temp = stage_save(&self.document, &dest)?;
+        self.replace_document(&temp, &dest)?;
+
+        let info = Arc::new(self.saved_info(&dest));
+        self.source_outline = info.outline.clone();
+        self.source_title = info.title.clone();
+        self.info = info.clone();
+        self.source_baseline = None;
+        self.modified = false;
+        Ok(info)
+    }
+
+    fn apply_edit(&mut self, request: EditRequest) {
+        if request.doc != self.info.id {
+            return;
+        }
+
+        match self.rebuild(&request.sources, &request.rotations) {
+            Ok(document) => {
+                let mut info = describe(&document, next_document_id(), &self.info.path);
+                info.title = self.source_title.clone();
+                info.outline = remap_outline(&self.source_outline, &request.sources);
+
+                self.pages.clear();
+                self.document = document;
+                self.modified = true;
+                self.scratch = None;
+                self.parsed = 0;
+                self.sent.clear();
+                self.copy = None;
+                self.search = None;
+                self.haystacks = (0..info.pages.len()).map(|_| None).collect();
+                self.info = Arc::new(info);
+
+                if let Ok(mut queue) = self.shared.queue.lock() {
+                    queue.doc = self.info.id;
+                    queue.wanted = Wanted::default();
+                }
+
+                (self.emit)(Event::Edited(self.info.clone()));
+            }
+            Err(error) => (self.emit)(Event::EditFailed {
+                doc: request.doc,
+                error,
+            }),
+        }
+    }
+
+    fn rebuild(&self, sources: &[u32], rotations: &[(u32, u8)]) -> Result<PdfDocument<'p>, String> {
+        let baseline = if let Some(source) = &self.source_baseline {
+            self.pdfium
+                .load_pdf_from_byte_vec(source.save_to_bytes().map_err(|e| e.to_string())?, None)
+        } else {
+            self.pdfium.load_pdf_from_file(&self.info.path, None)
+        }
+        .map_err(|error| format!("无法重新加载源 PDF：{error}"))?;
+        self.rebuild_from(baseline, sources, rotations)
+    }
+
+    fn rebuild_from(
+        &self,
+        baseline: PdfDocument<'p>,
+        sources: &[u32],
+        rotations: &[(u32, u8)],
+    ) -> Result<PdfDocument<'p>, String> {
+        let page_count = baseline.pages().len() as u32;
+
+        if sources.is_empty() || sources.len() > page_count as usize {
+            return Err("PDF 必须至少保留一页。".into());
+        }
+
+        let unique: HashSet<_> = sources.iter().copied().collect();
+        if unique.len() != sources.len() || sources.iter().any(|source| *source >= page_count) {
+            return Err("所选页面已失效。".into());
+        }
+        if rotations
+            .iter()
+            .any(|(source, turns)| *source >= page_count || *turns >= 4)
+        {
+            return Err("页面旋转参数已失效。".into());
+        }
+
+        if sources.len() == page_count as usize && sources.iter().copied().eq(0..page_count) {
+            let mut output = baseline;
+            for (source, turns) in rotations {
+                let mut page = output
+                    .pages_mut()
+                    .get(*source as PdfPageIndex)
+                    .map_err(|error| format!("无法旋转第 {} 页：{error}", source + 1))?;
+                let original = page.rotation().unwrap_or(PdfPageRenderRotation::None);
+                page.set_rotation(rotate(original, *turns));
+            }
+            return Ok(output);
+        }
+
+        let mut output = self
+            .pdfium
+            .create_new_pdf()
+            .map_err(|error| format!("无法创建编辑后的 PDF：{error}"))?;
+
+        let range = sources
+            .iter()
+            .map(|source| (source + 1).to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        output
+            .pages_mut()
+            .copy_pages_from_document(&baseline, &range, 0)
+            .map_err(|error| format!("无法复制所选页面：{error}"))?;
+
+        for (slot, source) in sources.iter().copied().enumerate() {
+            if let Some((_, turns)) = rotations.iter().find(|(page, _)| *page == source) {
+                let mut page = output
+                    .pages_mut()
+                    .get(slot as PdfPageIndex)
+                    .map_err(|error| format!("无法旋转第 {} 页：{error}", slot + 1))?;
+                let original = page.rotation().unwrap_or(PdfPageRenderRotation::None);
+                page.set_rotation(rotate(original, *turns));
+            }
+        }
+
+        Ok(output)
+    }
+
+    fn import_pages(&mut self, request: ImportRequest) {
+        if request.edit.doc != self.info.id {
+            return;
+        }
+        let result = (|| {
+            let baseline = if let Some(source) = &self.source_baseline {
+                self.pdfium.load_pdf_from_byte_vec(
+                    source.save_to_bytes().map_err(|e| e.to_string())?,
+                    None,
+                )
+            } else {
+                self.pdfium.load_pdf_from_file(&self.info.path, None)
+            }
+            .map_err(|e| e.to_string())?;
+            let mut combined = self.pdfium.create_new_pdf().map_err(|e| e.to_string())?;
+            let first_source = baseline.pages().len() as u32;
+            combined
+                .pages_mut()
+                .append(&baseline)
+                .map_err(|e| e.to_string())?;
+            let extension = request
+                .path
+                .extension()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_ascii_lowercase();
+            if extension == "pdf" {
+                let incoming = self
+                    .pdfium
+                    .load_pdf_from_file(&request.path, None)
+                    .map_err(|e| describe_open_error(&e))?;
+                if first_source + incoming.pages().len() as u32 > u16::MAX as u32 {
+                    return Err("合并后的 PDF 页数超出支持范围".into());
+                }
+                combined
+                    .pages_mut()
+                    .append(&incoming)
+                    .map_err(|e| e.to_string())?;
+            } else {
+                let image = raster::load_image(&request.path)?;
+                if first_source == u16::MAX as u32 {
+                    return Err("PDF 页数超出支持范围".into());
+                }
+                raster::append_image(&mut combined, &image)?;
+            }
+            let count = combined.pages().len() as u32 - first_source;
+            if count == 0 {
+                return Err("拖入的文件没有可插入页面".into());
+            }
+            if request.slot as usize > request.edit.sources.len() {
+                return Err("插入位置已失效".into());
+            }
+            let mut sources = request.edit.sources.clone();
+            sources.splice(
+                request.slot as usize..request.slot as usize,
+                first_source..first_source + count,
+            );
+            let copy = self
+                .pdfium
+                .load_pdf_from_byte_vec(combined.save_to_bytes().map_err(|e| e.to_string())?, None)
+                .map_err(|e| e.to_string())?;
+            let document = self.rebuild_from(copy, &sources, &request.edit.rotations)?;
+            let mut info = describe(&document, next_document_id(), &self.info.path);
+            info.title = self.source_title.clone();
+            info.outline = remap_outline(&self.source_outline, &sources);
+            self.reset_document_state(info.pages.len());
+            self.document = document;
+            self.source_baseline = Some(combined);
+            self.modified = true;
+            self.copy = None;
+            self.search = None;
+            self.info = Arc::new(info);
+            if let Ok(mut queue) = self.shared.queue.lock() {
+                queue.doc = self.info.id;
+                queue.wanted = Wanted::default();
+            }
+            (self.emit)(Event::Imported {
+                info: self.info.clone(),
+                first_source,
+                count,
+                slot: request.slot,
+            });
+            Ok(())
+        })();
+        if let Err(error) = result {
+            (self.emit)(Event::EditFailed {
+                doc: request.edit.doc,
+                error,
+            });
+        }
+    }
+
     fn start(&mut self, job: Job) {
         let page_count = self.info.pages.len() as u32;
 
         self.job = Some(match job {
+            Job::Raster { dest, settings } => {
+                let same_path = fs::canonicalize(&dest)
+                    .ok()
+                    .zip(fs::canonicalize(&self.info.path).ok())
+                    .is_some_and(|(a, b)| a == b);
+                if same_path {
+                    (self.emit)(Event::JobFailed {
+                        kind: JobKind::Raster,
+                        error: "请选择新路径，纯图 PDF 不覆盖源文档".into(),
+                    });
+                    return;
+                }
+                match raster::Output::new(self.pdfium, &dest, settings.format) {
+                    Ok(output) => Active::Raster {
+                        dest,
+                        settings,
+                        page: 0,
+                        output,
+                    },
+                    Err(error) => {
+                        (self.emit)(Event::JobFailed {
+                            kind: JobKind::Raster,
+                            error,
+                        });
+                        return;
+                    }
+                }
+            }
+            Job::Estimate { request, settings } => {
+                let mut samples = vec![0, page_count / 2, page_count.saturating_sub(1)];
+                samples.sort_unstable();
+                samples.dedup();
+                Active::Estimate {
+                    request,
+                    settings,
+                    samples,
+                    done: 0,
+                    bytes: 0,
+                    area: 0.0,
+                }
+            }
             Job::Export { dest } => Active::Export {
                 dest,
                 page: 0,
                 pages: Vec::with_capacity(page_count as usize),
             },
-            Job::Print(target) => match print::Session::begin(target, &self.info) {
+            Job::Print(target) => match if self.modified {
+                self.document
+                    .save_to_bytes()
+                    .map_err(|e| e.to_string())
+                    .and_then(|bytes| print::Session::begin_current(target, &self.info, bytes))
+            } else {
+                print::Session::begin(target, &self.info)
+            } {
                 Ok(session) => Active::Print(session),
                 Err(error) => {
                     (self.emit)(Event::JobFailed {
@@ -680,6 +1074,69 @@ impl<'p> Session<'_, 'p> {
                     return;
                 }
             },
+            Job::Save { dest } => Active::Save { dest },
+            Job::Compact { dest } => Active::Compact { dest },
+            Job::Extract { dest, pages } => {
+                if dest == self.info.path {
+                    (self.emit)(Event::JobFailed {
+                        kind: JobKind::Extract,
+                        error: "请选择其他路径，以免替换当前 PDF。".into(),
+                    });
+                    return;
+                }
+                let valid = !pages.is_empty()
+                    && pages.iter().all(|page| *page < page_count)
+                    && pages.iter().copied().collect::<HashSet<_>>().len() == pages.len();
+                let mut output = if valid {
+                    self.pdfium
+                        .create_new_pdf()
+                        .map_err(|error| format!("无法创建提取的 PDF：{error}"))
+                } else {
+                    Err("所选页面已失效。".into())
+                };
+
+                if let Ok(document) = &mut output {
+                    let range = pages
+                        .iter()
+                        .map(|page| (page + 1).to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    if let Err(error) =
+                        document
+                            .pages_mut()
+                            .copy_pages_from_document(&self.document, &range, 0)
+                    {
+                        (self.emit)(Event::JobFailed {
+                            kind: JobKind::Extract,
+                            error: format!("无法复制所选页面：{error}"),
+                        });
+                        return;
+                    }
+                }
+
+                match output {
+                    Ok(output) => {
+                        let total = pages.len() as u32;
+                        (self.emit)(Event::Progress {
+                            kind: JobKind::Extract,
+                            done: total,
+                            total,
+                        });
+                        Active::Extract {
+                            dest,
+                            total,
+                            output,
+                        }
+                    }
+                    Err(error) => {
+                        (self.emit)(Event::JobFailed {
+                            kind: JobKind::Extract,
+                            error,
+                        });
+                        return;
+                    }
+                }
+            }
         });
     }
 
@@ -809,6 +1266,88 @@ impl<'p> Session<'_, 'p> {
         let page_count = self.info.pages.len() as u32;
 
         let outcome: Result<Option<Active>, String> = match job {
+            Active::Raster {
+                dest,
+                settings,
+                page,
+                mut output,
+            } => (|| {
+                if page < page_count {
+                    let size = self.info.pages[page as usize];
+                    let image = raster::render(&self.document, page, size, settings)?;
+                    output.add(page, size, &image, settings)?;
+                    (self.emit)(Event::Progress {
+                        kind,
+                        done: page + 1,
+                        total: page_count,
+                    });
+                    Ok(Some(Active::Raster {
+                        dest,
+                        settings,
+                        page: page + 1,
+                        output,
+                    }))
+                } else {
+                    match &output {
+                        raster::Output::Pdf(document) => atomic_save(document, &dest)?,
+                        raster::Output::Images(_) => output.publish_images(&dest)?,
+                    }
+                    (self.emit)(Event::Exported(dest));
+                    Ok(None)
+                }
+            })(),
+            Active::Estimate {
+                request,
+                settings,
+                samples,
+                done,
+                bytes,
+                area,
+            } => {
+                let estimate = (|| {
+                    if done < samples.len() {
+                        let page = samples[done];
+                        let size = self.info.pages[page as usize];
+                        let image = raster::render(&self.document, page, size, settings)?;
+                        let length = raster::jpeg(&image, settings.quality)?.len() as u64;
+                        Ok(Some(Active::Estimate {
+                            request,
+                            settings,
+                            samples,
+                            done: done + 1,
+                            bytes: bytes + length,
+                            area: area + f64::from(size.width) * f64::from(size.height),
+                        }))
+                    } else {
+                        let total_area: f64 = self
+                            .info
+                            .pages
+                            .iter()
+                            .map(|p| f64::from(p.width) * f64::from(p.height))
+                            .sum();
+                        let estimated = (bytes as f64 * total_area / area.max(1.0)) as u64
+                            + u64::from(page_count) * 1024
+                            + 4096;
+                        (self.emit)(Event::RasterEstimated {
+                            doc: self.info.id,
+                            request,
+                            bytes: Ok(estimated),
+                        });
+                        Ok(None)
+                    }
+                })();
+                match estimate {
+                    Ok(next) => Ok(next),
+                    Err(error) => {
+                        (self.emit)(Event::RasterEstimated {
+                            doc: self.info.id,
+                            request,
+                            bytes: Err(error),
+                        });
+                        Ok(None)
+                    }
+                }
+            }
             Active::Export {
                 dest,
                 page,
@@ -860,6 +1399,62 @@ impl<'p> Session<'_, 'p> {
                 }
                 Err(error) => Err(error),
             },
+            Active::Save { dest } => match self.save_current(dest.clone()) {
+                Ok(info) => {
+                    (self.emit)(Event::Saved { info, path: dest });
+                    Ok(None)
+                }
+                Err(error) => Err(error),
+            },
+            Active::Compact { dest } => (|| {
+                let before = fs::metadata(&self.info.path)
+                    .map(|meta| meta.len())
+                    .unwrap_or(0);
+                let temp = stage_save(&self.document, &dest)?;
+                let after = fs::metadata(&temp).map(|meta| meta.len()).unwrap_or(0);
+                let same_path = dest == self.info.path;
+                let replaced = !same_path || after < before;
+
+                if same_path && after >= before {
+                    let _ = fs::remove_file(&temp);
+                } else if same_path {
+                    self.replace_document(&temp, &dest)?;
+                    let info = Arc::new(self.saved_info(&dest));
+                    self.source_outline = info.outline.clone();
+                    self.source_title = info.title.clone();
+                    self.info = info.clone();
+                    self.source_baseline = None;
+                    self.modified = false;
+                    (self.emit)(Event::Saved {
+                        info,
+                        path: dest.clone(),
+                    });
+                } else {
+                    publish_save(&temp, &dest)?;
+                }
+
+                (self.emit)(Event::Compacted {
+                    path: dest,
+                    before,
+                    after,
+                    replaced,
+                });
+                Ok(None)
+            })(),
+            Active::Extract {
+                dest,
+                total,
+                output,
+            } => match atomic_save(&output, &dest) {
+                Ok(()) => {
+                    (self.emit)(Event::Extracted {
+                        path: dest,
+                        pages: total,
+                    });
+                    Ok(None)
+                }
+                Err(error) => Err(error),
+            },
         };
 
         match outcome {
@@ -867,6 +1462,91 @@ impl<'p> Session<'_, 'p> {
             Err(error) => (self.emit)(Event::JobFailed { kind, error }),
         }
     }
+}
+
+fn rotate(original: PdfPageRenderRotation, quarter_turns: u8) -> PdfPageRenderRotation {
+    let turns = match original {
+        PdfPageRenderRotation::None => 0,
+        PdfPageRenderRotation::Degrees90 => 1,
+        PdfPageRenderRotation::Degrees180 => 2,
+        PdfPageRenderRotation::Degrees270 => 3,
+    };
+
+    match (turns + quarter_turns) % 4 {
+        0 => PdfPageRenderRotation::None,
+        1 => PdfPageRenderRotation::Degrees90,
+        2 => PdfPageRenderRotation::Degrees180,
+        _ => PdfPageRenderRotation::Degrees270,
+    }
+}
+
+fn remap_outline(outline: &[OutlineItem], sources: &[u32]) -> Vec<OutlineItem> {
+    outline
+        .iter()
+        .filter_map(|item| {
+            let page = item.page.and_then(|source| {
+                sources
+                    .iter()
+                    .position(|candidate| *candidate == source)
+                    .map(|slot| slot as u32)
+            });
+            (item.page.is_none() || page.is_some()).then(|| OutlineItem {
+                title: item.title.clone(),
+                depth: item.depth,
+                page,
+            })
+        })
+        .collect()
+}
+
+fn stage_save(document: &PdfDocument, dest: &Path) -> Result<PathBuf, String> {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+    let parent = dest
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let name = dest
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "document.pdf".into());
+    let temp = parent.join(format!(
+        ".{name}.folio-{}-{}.tmp",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+
+    let saved = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(|error| format!("无法创建临时 PDF：{error}"))?;
+        document
+            .save_to_writer(&mut file)
+            .map_err(|error| format!("无法写入 PDF：{error}"))?;
+        file.flush()
+            .map_err(|error| format!("无法刷新 PDF 文件：{error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("无法同步 PDF 文件：{error}"))
+    })();
+
+    if saved.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+
+    saved.map(|()| temp)
+}
+
+fn publish_save(temp: &Path, dest: &Path) -> Result<(), String> {
+    fs::rename(temp, dest).map_err(|error| format!("无法替换 {}：{error}", dest.display()))
+}
+
+fn atomic_save(document: &PdfDocument, dest: &Path) -> Result<(), String> {
+    let temp = stage_save(document, dest)?;
+    publish_save(&temp, dest).inspect_err(|_| {
+        let _ = fs::remove_file(&temp);
+    })
 }
 
 struct Region {
@@ -1449,4 +2129,63 @@ fn style_of(char: &PdfPageTextChar, name: &str) -> u8 {
     }
 
     style
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recycling_an_edited_document_keeps_its_content_and_returns_to_idle() {
+        let _exclusive = exclusive();
+        let pdfium = pdfium().as_ref().unwrap();
+        let path = crate::engine::tests::fixture_path();
+        let source = pdfium.load_pdf_from_file(&path, None).unwrap();
+        let expected = source.pages().get(2).unwrap().text().unwrap().all();
+        let mut document = pdfium.create_new_pdf().unwrap();
+        document
+            .pages_mut()
+            .copy_pages_from_document(&source, "3,1,2", 0)
+            .unwrap();
+        let info = Arc::new(describe(&document, 1, &path));
+        let shared = Shared {
+            queue: Mutex::new(super::super::Queue::default()),
+            wake: std::sync::Condvar::new(),
+        };
+        let emit: Emit = Box::new(|_| {});
+        let mut session = Session {
+            pdfium,
+            pages: VecDeque::new(),
+            document,
+            source_baseline: None,
+            modified: true,
+            parsed: RECYCLE_AFTER,
+            scratch: None,
+            haystacks: vec![None, None, None],
+            source_outline: Vec::new(),
+            source_title: String::new(),
+            info,
+            shared: &shared,
+            emit: &emit,
+            sent: VecDeque::new(),
+            tiles_sent: 0,
+            copy: None,
+            search: None,
+            job: None,
+        };
+        session.tidy();
+        assert_eq!(session.parsed, 0);
+        assert!(session.scratch.is_none());
+        assert_eq!(
+            session
+                .document
+                .pages()
+                .get(0)
+                .unwrap()
+                .text()
+                .unwrap()
+                .all(),
+            expected
+        );
+    }
 }

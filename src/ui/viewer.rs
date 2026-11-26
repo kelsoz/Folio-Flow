@@ -10,6 +10,7 @@ use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::sync::Arc;
 
+use iced::advanced::graphics::geometry::Renderer as _;
 use iced::advanced::image::{self, Renderer as _};
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::mouse::click;
@@ -18,16 +19,19 @@ use iced::advanced::widget::{self, Tree, Widget};
 use iced::advanced::{Clipboard, Shell};
 use iced::keyboard;
 use iced::mouse;
+use iced::widget::canvas;
 use iced::window;
 use iced::{Border, Color, Element, Event, Length, Point, Rectangle, Shadow, Size, Vector, border};
 use lru::LruCache;
 
+use crate::app::{EditAnimation, EditKind};
 use crate::engine::text::{self, Rect};
 use crate::engine::{
     Anchor, Bitmap, DocInfo, Granularity, Link, Match, PageSize, PageText, TILE, TileKey, Wanted,
     page_pixels,
 };
 use crate::trace;
+use crate::ui::order::PageOrder;
 use crate::ui::theme::Palette;
 
 /// Space around the page stack, in logical pixels.
@@ -40,7 +44,7 @@ const POINT: f32 = 96.0 / 72.0;
 pub const MIN_ZOOM: f32 = 0.1;
 pub const MAX_ZOOM: f32 = 8.0;
 
-const ZOOM_STEPS: [f32; 17] = [
+pub const ZOOM_STEPS: [f32; 17] = [
     0.1, 0.25, 0.33, 0.5, 0.67, 0.75, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 3.0, 4.0, 6.0, 8.0,
 ];
 
@@ -52,6 +56,7 @@ const TEXT_CACHE: usize = 48;
 /// Thumbnails kept beyond those the sidebar is showing: the ones standing in
 /// for pages in view, and a few the sidebar has just scrolled past.
 const THUMBNAIL_SPARE: usize = 12;
+const MAX_STALE_SCALES: usize = 4;
 
 const SCROLLBAR_WIDTH: f32 = 8.0;
 const SCROLLBAR_INSET: f32 = 3.0;
@@ -89,6 +94,13 @@ struct Tile {
     bytes: usize,
 }
 
+pub(crate) struct PageSnapshot {
+    pub rect: Rectangle,
+    pub size: PageSize,
+    pub thumbnail: Option<image::Handle>,
+    pub tiles: Vec<(Rectangle, image::Handle)>,
+}
+
 pub struct Viewer {
     doc: Option<Arc<DocInfo>>,
     /// `offsets[i]` is the summed height in points of the pages before `i`.
@@ -103,9 +115,10 @@ pub struct Viewer {
     scale_factor: f32,
     tiles: LruCache<TileKey, Tile>,
     tile_bytes: usize,
-    /// Scale of the tiles on screen before the last zoom change. They are
-    /// shown stretched until tiles at the new scale arrive.
-    stale_scale: Option<u32>,
+    /// Rendered scales kept stretched until tiles at the current scale arrive.
+    stale_scales: Vec<u32>,
+    /// Visible tiles at those scales that the cache budget must retain.
+    fallback_bytes: usize,
     thumbnails: LruCache<u32, image::Handle>,
     texts: LruCache<u32, Arc<PageText>>,
     selection: Option<Selection>,
@@ -141,7 +154,8 @@ impl Default for Viewer {
             scale_factor: 1.0,
             tiles: LruCache::unbounded(),
             tile_bytes: 0,
-            stale_scale: None,
+            stale_scales: Vec::new(),
+            fallback_bytes: 0,
             thumbnails: LruCache::new(NonZeroUsize::new(THUMBNAIL_SPARE).unwrap()),
             texts: LruCache::new(NonZeroUsize::new(TEXT_CACHE).unwrap()),
             selection: None,
@@ -177,7 +191,8 @@ impl Viewer {
         self.tiles.clear();
         self.tile_bytes = 0;
         self.received = 0;
-        self.stale_scale = None;
+        self.stale_scales.clear();
+        self.fallback_bytes = 0;
         self.thumbnails.clear();
         self.texts.clear();
         self.selection = None;
@@ -192,6 +207,41 @@ impl Viewer {
         if self.zoom > 1.5 {
             self.fit = Fit::Manual;
             self.zoom = 1.25;
+        }
+    }
+
+    pub fn set_document_after_edit(
+        &mut self,
+        doc: Arc<DocInfo>,
+        previous: &PageOrder,
+        next: &PageOrder,
+        invalidated: &[u32],
+    ) {
+        let thumbnails = previous
+            .as_sources()
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, source)| !invalidated.contains(source))
+            .filter_map(|(slot, source)| {
+                let target = next.slot_of(source)?;
+                Some((target, self.thumbnail(slot as u32)?.clone()))
+            })
+            .collect::<Vec<_>>();
+
+        self.set_document(doc);
+        for (slot, thumbnail) in thumbnails {
+            self.thumbnails.put(slot, thumbnail);
+        }
+    }
+
+    pub fn update_document_info(&mut self, doc: Arc<DocInfo>) {
+        if self
+            .doc
+            .as_ref()
+            .is_some_and(|current| current.id == doc.id)
+        {
+            self.doc = Some(doc);
         }
     }
 
@@ -433,9 +483,73 @@ impl Viewer {
 
     pub fn set_scale_factor(&mut self, scale_factor: f32) {
         if scale_factor > 0.0 && scale_factor != self.scale_factor {
-            self.stale_scale = Some(self.device_scale().to_bits());
+            self.remember_stale_scale();
             self.scale_factor = scale_factor;
         }
+    }
+
+    fn remember_stale_scale(&mut self) {
+        let scale = self.device_scale().to_bits();
+        let top = self.scroll_y;
+        let bottom = top + self.viewport.height as f64;
+        let useful = self.pages_between(top, bottom).any(|page| {
+            let (cols, rows) = self.tile_range(page, f32::from_bits(scale), top, bottom);
+            rows.into_iter().any(|row| {
+                cols.clone().any(|col| {
+                    self.tiles.contains(&TileKey {
+                        page,
+                        scale,
+                        col,
+                        row,
+                    })
+                })
+            })
+        });
+
+        if useful {
+            self.stale_scales.retain(|saved| *saved != scale);
+            if self.stale_scales.len() == MAX_STALE_SCALES {
+                self.stale_scales.remove(0);
+            }
+            self.stale_scales.push(scale);
+        }
+    }
+
+    fn fallback_scale(&self, page: u32) -> Option<f32> {
+        let top = self.scroll_y;
+        let bottom = top + self.viewport.height as f64;
+        let mut best = None;
+        let mut covered = 0;
+
+        for saved in self.stale_scales.iter().rev() {
+            let scale = f32::from_bits(*saved);
+            let (cols, rows) = self.tile_range(page, scale, top, bottom);
+            let total = cols.len() * rows.len();
+            let mut count = 0;
+
+            for row in rows {
+                for col in cols.clone() {
+                    if self.tiles.contains(&TileKey {
+                        page,
+                        scale: *saved,
+                        col,
+                        row,
+                    }) {
+                        count += 1;
+                    }
+                }
+            }
+
+            if count > covered {
+                covered = count;
+                best = Some(scale);
+            }
+            if total > 0 && count == total {
+                return Some(scale);
+            }
+        }
+
+        best
     }
 
     // --- Zoom -------------------------------------------------------------
@@ -530,7 +644,7 @@ impl Viewer {
         let from_centre =
             (self.scroll_x + anchor.x as f64 - self.content_width() / 2.0) / self.ppp();
 
-        self.stale_scale = Some(self.device_scale().to_bits());
+        self.remember_stale_scale();
         self.zoom = zoom;
 
         self.scroll_y = self.page_top(page) + into_page * self.ppp() - anchor.y as f64;
@@ -664,13 +778,35 @@ impl Viewer {
         }
 
         if complete {
-            self.stale_scale = None;
+            self.stale_scales.clear();
+            self.fallback_bytes = 0;
+            self.trim_tiles();
+        } else {
+            self.fallback_bytes = 0;
+            for scale in self.stale_scales.clone() {
+                let scale = f32::from_bits(scale);
+                for page in visible.clone() {
+                    let (cols, rows) = self.tile_range(page, scale, top, bottom);
+                    for row in rows {
+                        for col in cols.clone() {
+                            if let Some(tile) = self.tiles.get(&TileKey {
+                                page,
+                                scale: scale.to_bits(),
+                                col,
+                                row,
+                            }) {
+                                self.fallback_bytes += tile.bytes;
+                            }
+                        }
+                    }
+                }
+            }
         }
 
-        // Room for what the sidebar shows and no more: with the sidebar
-        // shut, that is none.
+        // Reader and sidebar thumbnails are requested separately; shrinking
+        // here would evict images the next request in the same frame needs.
         if let Some(capacity) = NonZeroUsize::new(sidebar_thumbnails.len() + THUMBNAIL_SPARE)
-            && capacity != self.thumbnails.cap()
+            && capacity > self.thumbnails.cap()
         {
             self.thumbnails.resize(capacity);
         }
@@ -685,13 +821,41 @@ impl Viewer {
         wanted
     }
 
+    /// Thumbnails missing for a view that does not lay out Reader pages.
+    pub fn wanted_thumbnails(&mut self, pages: &[u32]) -> Wanted {
+        let mut wanted = Wanted {
+            received: self.received,
+            ..Wanted::default()
+        };
+
+        if self.doc.is_none() {
+            return wanted;
+        }
+
+        if let Some(capacity) = NonZeroUsize::new(pages.len() + THUMBNAIL_SPARE)
+            && capacity > self.thumbnails.cap()
+        {
+            self.thumbnails.resize(capacity);
+        }
+
+        for page in pages {
+            if self.thumbnails.get(page).is_none() && !wanted.thumbnails.contains(page) {
+                wanted.thumbnails.push(*page);
+            }
+        }
+
+        wanted
+    }
+
     /// Bytes of rendered tiles to keep: those the view and its prefetch
     /// need, however many that is, and a share of that again to spare. The
     /// budget must never be less than what is needed: a tile dropped while
     /// it was still wanted would be rendered again, only to push out
     /// another.
     fn tile_budget(&self) -> usize {
-        self.needed + (self.needed / 2).clamp(*TILE_SPARE.start(), *TILE_SPARE.end())
+        self.needed
+            + self.fallback_bytes
+            + (self.needed / 2).clamp(*TILE_SPARE.start(), *TILE_SPARE.end())
     }
 
     pub fn insert_tile(&mut self, key: TileKey, bitmap: Bitmap) {
@@ -705,7 +869,10 @@ impl Viewer {
         }
 
         self.tile_bytes += bytes;
+        self.trim_tiles();
+    }
 
+    fn trim_tiles(&mut self) {
         let budget = self.tile_budget();
 
         while self.tile_bytes > budget {
@@ -741,6 +908,60 @@ impl Viewer {
 
     pub fn thumbnail(&self, page: u32) -> Option<&image::Handle> {
         self.thumbnails.peek(&page)
+    }
+
+    pub(crate) fn page_rects(&self) -> Vec<Rectangle> {
+        (0..self.page_count())
+            .map(|page| self.page_rect(page))
+            .collect()
+    }
+
+    pub(crate) fn snapshot(&self, page: u32) -> Option<PageSnapshot> {
+        let doc = self.doc.as_ref()?;
+        if page as usize >= doc.pages.len() {
+            return None;
+        }
+
+        let rect = self.page_rect(page);
+        let size = self.size(page);
+        let scale = self.device_scale();
+        let device = self.scale_factor;
+        let top = self.scroll_y;
+        let bottom = top + self.viewport.height as f64;
+        let (cols, rows) = self.tile_range(page, scale, top, bottom);
+        let (page_width, page_height) = page_pixels(size, scale);
+        let mut tiles = Vec::new();
+
+        for row in rows {
+            for col in cols.clone() {
+                let Some(tile) = self.tiles.peek(&TileKey {
+                    page,
+                    scale: scale.to_bits(),
+                    col,
+                    row,
+                }) else {
+                    continue;
+                };
+                let x = col as u32 * TILE;
+                let y = row as u32 * TILE;
+                tiles.push((
+                    Rectangle {
+                        x: rect.x + x as f32 / device,
+                        y: rect.y + y as f32 / device,
+                        width: (page_width - x).min(TILE) as f32 / device,
+                        height: (page_height - y).min(TILE) as f32 / device,
+                    },
+                    tile.handle.clone(),
+                ));
+            }
+        }
+
+        Some(PageSnapshot {
+            rect,
+            size,
+            thumbnail: self.thumbnail(page).cloned(),
+            tiles,
+        })
     }
 
     pub fn insert_text(&mut self, page: u32, text: Arc<PageText>) {
@@ -1085,11 +1306,13 @@ pub enum Interaction {
 pub fn view<'a, Message: 'a>(
     viewer: &'a Viewer,
     palette: Palette,
+    animation: Option<&'a EditAnimation>,
     on_interaction: impl Fn(Interaction) -> Message + 'a,
 ) -> Element<'a, Message> {
     Element::new(View {
         viewer,
         palette,
+        animation,
         on_interaction: Box::new(on_interaction),
     })
 }
@@ -1097,6 +1320,7 @@ pub fn view<'a, Message: 'a>(
 struct View<'a, Message> {
     viewer: &'a Viewer,
     palette: Palette,
+    animation: Option<&'a EditAnimation>,
     on_interaction: Box<dyn Fn(Interaction) -> Message + 'a>,
 }
 
@@ -1353,25 +1577,18 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for View<'_, Message>
 
         renderer.with_layer(bounds, |renderer| {
             for page in pages.clone() {
-                let rect = viewer.page_rect(page) + origin;
-
-                // Paper, with a soft shadow lifting it off the canvas. Quads
-                // paint beneath images within a layer, so this never covers
-                // the tiles drawn below.
-                renderer.fill_quad(
-                    Quad {
-                        bounds: rect,
-                        border: Border::default(),
-                        shadow: Shadow {
-                            color: self.palette.shadow,
-                            offset: Vector::new(0.0, 1.0),
-                            blur_radius: 10.0,
-                        },
-                        snap: true,
-                    },
-                    Color::WHITE,
-                );
-
+                let rotating = self
+                    .animation
+                    .and_then(|animation| animation.rotation(page))
+                    .filter(|page| page.has_image());
+                if rotating.is_some() {
+                    continue;
+                }
+                let target = viewer.page_rect(page);
+                let rect = self
+                    .animation
+                    .map_or(target, |animation| animation.reader_rect(page, target))
+                    + origin;
                 let (cols, rows) = viewer.tile_range(page, scale, top, bottom);
                 let tile_at = |col, row, scale: f32| {
                     viewer.tiles.peek(&TileKey {
@@ -1386,14 +1603,56 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for View<'_, Message>
                     .clone()
                     .all(|row| cols.clone().all(|col| tile_at(col, row, scale).is_some()));
 
-                if !complete {
-                    // Underlay: the thumbnail, then whatever was on screen
-                    // at the previous zoom, both stretched into place.
+                renderer.fill_quad(
+                    Quad {
+                        bounds: rect,
+                        border: Border::default(),
+                        shadow: Shadow {
+                            color: self.palette.shadow,
+                            offset: Vector::new(0.0, 1.0),
+                            blur_radius: 10.0,
+                        },
+                        snap: true,
+                    },
+                    Color::WHITE,
+                );
+
+                let fallback = if complete {
+                    None
+                } else {
+                    viewer.fallback_scale(page)
+                };
+
+                if complete {
+                    let (page_width, page_height) = page_pixels(viewer.size(page), scale);
+
+                    for row in rows {
+                        for col in cols.clone() {
+                            if let Some(tile) = tile_at(col, row, scale) {
+                                let x = col as u32 * TILE;
+                                let y = row as u32 * TILE;
+
+                                renderer.draw_image(
+                                    image::Image::new(tile.handle.clone()).snap(true),
+                                    Rectangle {
+                                        x: rect.x + x as f32 / device,
+                                        y: rect.y + y as f32 / device,
+                                        width: (page_width - x).min(TILE) as f32 / device,
+                                        height: (page_height - y).min(TILE) as f32 / device,
+                                    },
+                                    bounds,
+                                );
+                            }
+                        }
+                    }
+                } else {
+                    // Until every visible tile arrives, paint one old page
+                    // rather than interleaving old and new tile resolutions.
                     if let Some(thumbnail) = viewer.thumbnails.peek(&page) {
                         renderer.draw_image(image::Image::new(thumbnail.clone()), rect, bounds);
                     }
 
-                    if let Some(stale) = viewer.stale_scale.map(f32::from_bits) {
+                    if let Some(stale) = fallback {
                         let (stale_cols, stale_rows) = viewer.tile_range(page, stale, top, bottom);
                         let (stale_width, stale_height) = page_pixels(viewer.size(page), stale);
                         let step_x = rect.width / stale_width as f32;
@@ -1422,35 +1681,63 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for View<'_, Message>
                         }
                     }
                 }
-
-                let (page_width, page_height) = page_pixels(viewer.size(page), scale);
-
-                for row in rows {
-                    for col in cols.clone() {
-                        if let Some(tile) = tile_at(col, row, scale) {
-                            let x = col as u32 * TILE;
-                            let y = row as u32 * TILE;
-
-                            renderer.draw_image(
-                                image::Image::new(tile.handle.clone()).snap(true),
-                                Rectangle {
-                                    x: rect.x + x as f32 / device,
-                                    y: rect.y + y as f32 / device,
-                                    width: (page_width - x).min(TILE) as f32 / device,
-                                    height: (page_height - y).min(TILE) as f32 / device,
-                                },
-                                bounds,
-                            );
-                        }
-                    }
-                }
             }
         });
+
+        if let Some(animation) = self.animation {
+            renderer.with_translation(origin, |renderer| {
+                let mut frame = canvas::Frame::new(renderer, bounds.size());
+                for page in &animation.pages {
+                    if !page.has_image() {
+                        continue;
+                    }
+                    let target = match animation.kind {
+                        EditKind::Rotate => {
+                            let Some(slot) = page.to_slot.filter(|slot| pages.contains(slot))
+                            else {
+                                continue;
+                            };
+                            viewer.page_rect(slot)
+                        }
+                        EditKind::Delete => page.snapshot.rect,
+                    };
+                    let transform = animation.transform(page, target);
+                    let old = page.snapshot.rect;
+
+                    frame.with_save(|frame| {
+                        frame.translate(Vector::new(transform.center.x, transform.center.y));
+                        frame.rotate(iced::Radians(transform.angle));
+                        frame.scale(transform.scale);
+                        frame.translate(Vector::new(-old.center_x(), -old.center_y()));
+
+                        if let Some(thumbnail) = &page.snapshot.thumbnail {
+                            frame.draw_image(
+                                old,
+                                image::Image::new(thumbnail.clone()).opacity(transform.opacity),
+                            );
+                        }
+                        for (bounds, handle) in &page.snapshot.tiles {
+                            frame.draw_image(
+                                *bounds,
+                                image::Image::new(handle.clone())
+                                    .opacity(transform.opacity)
+                                    .snap(true),
+                            );
+                        }
+                    });
+                }
+                renderer.draw_geometry(frame.into_geometry());
+            });
+        }
 
         // A second layer, so these paint above the page images.
         renderer.with_layer(bounds, |renderer| {
             for page in pages.clone() {
-                let rect = viewer.page_rect(page) + origin;
+                let target = viewer.page_rect(page);
+                let rect = self
+                    .animation
+                    .map_or(target, |animation| animation.reader_rect(page, target))
+                    + origin;
                 let size = viewer.size(page);
                 let (sx, sy) = (rect.width / size.width, rect.height / size.height);
 
@@ -1549,6 +1836,110 @@ pub(crate) mod tests {
             outline: Vec::new(),
         }));
         viewer
+    }
+
+    #[test]
+    fn thumbnails_stay_rectangular() {
+        let mut viewer = viewer(1);
+        viewer.insert_thumbnail(
+            0,
+            Bitmap {
+                width: 64,
+                height: 64,
+                rgba: vec![255; 64 * 64 * 4],
+            },
+        );
+
+        let image::Handle::Rgba { pixels, .. } = viewer.thumbnail(0).unwrap() else {
+            panic!("expected rgba pixels");
+        };
+        let alpha = |x: usize, y: usize| pixels[(y * 64 + x) * 4 + 3];
+
+        assert_eq!(alpha(0, 0), 255);
+        assert_eq!(alpha(32, 0), 255);
+        assert_eq!(alpha(32, 32), 255);
+    }
+
+    #[test]
+    fn snapshot_keeps_visible_tiles_and_thumbnail() {
+        let mut viewer = viewer(1);
+        viewer.insert_thumbnail(
+            0,
+            Bitmap {
+                width: 64,
+                height: 64,
+                rgba: vec![255; 64 * 64 * 4],
+            },
+        );
+        render_until_complete(&mut viewer);
+
+        let snapshot = viewer.snapshot(0).unwrap();
+        assert_eq!(snapshot.rect, viewer.page_rect(0));
+        assert!(snapshot.thumbnail.is_some());
+        assert!(!snapshot.tiles.is_empty());
+    }
+
+    #[test]
+    fn edited_document_rekeys_thumbnails_and_invalidates_only_changed_pages() {
+        let mut viewer = viewer(3);
+        for page in 0..3 {
+            viewer.insert_thumbnail(
+                page,
+                Bitmap {
+                    width: 1,
+                    height: 1,
+                    rgba: vec![page as u8 * 40, 99, 77, 255],
+                },
+            );
+        }
+        let current = viewer.document().unwrap();
+        let doc = DocInfo {
+            id: 2,
+            path: current.path.clone(),
+            title: current.title.clone(),
+            pages: current.pages.clone(),
+            outline: current.outline.clone(),
+        };
+        let mut previous = PageOrder::default();
+        previous.reset(3);
+        let mut next = PageOrder::default();
+        next.reset(3);
+        next.move_slot(1, 0);
+
+        viewer.set_document_after_edit(Arc::new(doc), &previous, &next, &[1]);
+
+        assert!(viewer.thumbnail(0).is_none());
+        for (slot, source) in [(1, 0), (2, 2)] {
+            let image::Handle::Rgba { pixels, .. } = viewer.thumbnail(slot).unwrap() else {
+                panic!("expected rgba pixels");
+            };
+            assert_eq!(pixels[0], source as u8 * 40);
+        }
+        assert_eq!(viewer.wanted_thumbnails(&[0, 1, 2]).thumbnails, [0]);
+    }
+
+    #[test]
+    fn thumbnail_cache_does_not_evict_when_requests_shrink() {
+        let mut viewer = viewer(20);
+        let pages: Vec<u32> = (0..20).collect();
+        viewer.wanted_thumbnails(&pages);
+
+        for page in &pages {
+            viewer.insert_thumbnail(
+                *page,
+                Bitmap {
+                    width: 1,
+                    height: 1,
+                    rgba: vec![255; 4],
+                },
+            );
+        }
+
+        viewer.wanted(0..0);
+        let wanted = viewer.wanted_thumbnails(&[0]);
+
+        assert!(wanted.thumbnails.is_empty());
+        assert!(pages.iter().all(|page| viewer.thumbnail(*page).is_some()));
     }
 
     /// A page with the word "hello" at (100, 100), in 10pt-wide glyphs.
@@ -1700,6 +2091,74 @@ pub(crate) mod tests {
         }
 
         panic!("the view never had all its tiles");
+    }
+
+    #[test]
+    fn resize_and_zoom_keep_the_last_rendered_scale() {
+        let mut viewer = viewer(3);
+        render_until_complete(&mut viewer);
+
+        let rendered = viewer.device_scale().to_bits();
+        let top = viewer.scroll_y;
+        let bottom = top + viewer.viewport.height as f64;
+        let (cols, rows) = viewer.tile_range(0, f32::from_bits(rendered), top, bottom);
+        let retained = TileKey {
+            page: 0,
+            scale: rendered,
+            col: cols.clone().next().unwrap(),
+            row: rows.clone().next().unwrap(),
+        };
+        assert!(viewer.tiles.contains(&retained));
+
+        for width in [820.0, 840.0, 860.0, 880.0] {
+            viewer.set_viewport(Size::new(width, 600.0));
+        }
+        viewer.zoom_by(1.1, None);
+        viewer.zoom_by(1.1, None);
+
+        assert_eq!(viewer.stale_scales, [rendered]);
+        assert_eq!(viewer.fallback_scale(0), Some(f32::from_bits(rendered)));
+
+        let wanted = viewer.wanted(0..0);
+        assert!(!wanted.tiles.is_empty());
+        assert!(viewer.fallback_bytes > 0);
+
+        viewer.insert_tile(
+            wanted.tiles[0],
+            Bitmap {
+                width: 1,
+                height: 1,
+                rgba: vec![255; 4],
+            },
+        );
+        assert!(viewer.tiles.contains(&retained));
+
+        render_until_complete(&mut viewer);
+        assert!(viewer.stale_scales.is_empty());
+        assert_eq!(viewer.fallback_bytes, 0);
+        assert!(viewer.tile_bytes <= viewer.tile_budget());
+    }
+
+    #[test]
+    fn a_partial_new_scale_does_not_hide_a_complete_fallback() {
+        let mut viewer = viewer(3);
+        render_until_complete(&mut viewer);
+        let rendered = viewer.device_scale().to_bits();
+
+        viewer.zoom_by(1.1, None);
+        let wanted = viewer.wanted(0..0);
+        viewer.insert_tile(
+            wanted.tiles[0],
+            Bitmap {
+                width: 1,
+                height: 1,
+                rgba: vec![255; 4],
+            },
+        );
+        viewer.zoom_by(1.1, None);
+
+        assert_eq!(viewer.stale_scales.len(), 2);
+        assert_eq!(viewer.fallback_scale(0), Some(f32::from_bits(rendered)));
     }
 
     #[test]
@@ -1883,7 +2342,7 @@ pub(crate) mod tests {
             let mut ui = iced_test::Simulator::with_size(
                 iced::Settings::default(),
                 Size::new(800.0, 600.0),
-                view(&viewer, Palette::DARK, |interaction| interaction),
+                view(&viewer, Palette::DARK, None, |interaction| interaction),
             );
 
             ui.point_at(Point::new(300.0, 200.0));
@@ -1961,7 +2420,7 @@ pub(crate) mod tests {
         let mut ui = iced_test::Simulator::with_size(
             iced::Settings::default(),
             Size::new(800.0, 600.0),
-            view(&viewer, Palette::DARK, |interaction| interaction),
+            view(&viewer, Palette::DARK, None, |interaction| interaction),
         );
 
         ui.point_at(Point::new(300.0, 200.0));
@@ -2139,7 +2598,7 @@ pub(crate) mod tests {
         let mut ui = iced_test::Simulator::with_size(
             iced::Settings::default(),
             Size::new(800.0, 600.0),
-            view(&viewer, Palette::DARK, |interaction| interaction),
+            view(&viewer, Palette::DARK, None, |interaction| interaction),
         );
 
         ui.point_at(Point::new(thumb.x + 2.0, thumb.y + 2.0));

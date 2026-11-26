@@ -112,7 +112,7 @@ mod platform {
         release(dialog.hDevMode);
         release(dialog.hDevNames);
 
-        result.map_err(|error| format!("The print dialog failed: {error}"))?;
+        result.map_err(|error| format!("打印对话框无法打开：{error}"))?;
 
         if dialog.dwResultAction != PD_RESULT_PRINT || dialog.hDC.is_invalid() {
             if !dialog.hDC.is_invalid() {
@@ -172,7 +172,7 @@ mod platform {
             };
 
             if dc.is_invalid() {
-                return Err("The printer could not be opened.".into());
+                return Err("无法打开打印机。".into());
             }
 
             Ok(Self {
@@ -233,11 +233,24 @@ mod platform {
         }
     }
 
+    enum Data {
+        Mapped(memmap2::Mmap),
+        Owned(Vec<u8>),
+    }
+    impl Data {
+        fn bytes(&self) -> &[u8] {
+            match self {
+                Self::Mapped(data) => data,
+                Self::Owned(data) => data,
+            }
+        }
+    }
+
     pub struct Session {
         pdfium: Pdfium,
         document: Document,
         // PDFium reads from the mapping for as long as the document is open.
-        _data: memmap2::Mmap,
+        _data: Data,
         target: Target,
         pages: Vec<u32>,
         next: usize,
@@ -246,15 +259,31 @@ mod platform {
 
     impl Session {
         pub fn begin(target: Target, info: &DocInfo) -> Result<Self, String> {
-            let pdfium = Pdfium::load()?;
             let file = std::fs::File::open(&info.path).map_err(|error| error.to_string())?;
             let data = unsafe { memmap2::Mmap::map(&file) }.map_err(|error| error.to_string())?;
+            Self::begin_data(target, info, Data::Mapped(data))
+        }
 
-            let document =
-                unsafe { (pdfium.load)(data.as_ptr().cast(), data.len(), std::ptr::null()) };
+        pub fn begin_current(
+            target: Target,
+            info: &DocInfo,
+            bytes: Vec<u8>,
+        ) -> Result<Self, String> {
+            Self::begin_data(target, info, Data::Owned(bytes))
+        }
+
+        fn begin_data(target: Target, info: &DocInfo, data: Data) -> Result<Self, String> {
+            let pdfium = Pdfium::load()?;
+            let document = unsafe {
+                (pdfium.load)(
+                    data.bytes().as_ptr().cast(),
+                    data.bytes().len(),
+                    std::ptr::null(),
+                )
+            };
 
             if document.is_null() {
-                return Err("The document could not be opened for printing.".into());
+                return Err("无法打开待打印文档。".into());
             }
 
             let pages = target.selection.resolve(info.pages.len() as u32);
@@ -281,7 +310,7 @@ mod platform {
             };
 
             if unsafe { StartDocW(session.dc(), &doc_info) } <= 0 {
-                return Err("The printer did not accept the job.".into());
+                return Err("打印机未接受任务。".into());
             }
 
             Ok(session)
@@ -302,7 +331,7 @@ mod platform {
                 return if unsafe { EndDoc(dc) } > 0 {
                     Ok(None)
                 } else {
-                    Err("The printer rejected the job.".into())
+                    Err("打印机拒绝了任务。".into())
                 };
             };
 
@@ -312,7 +341,7 @@ mod platform {
                 unsafe {
                     if StartPage(dc) <= 0 {
                         (self.pdfium.close_page)(page);
-                        return Err("The printer stopped responding.".into());
+                        return Err("打印机停止响应。".into());
                     }
 
                     // Device units of the printable area, whose origin is
@@ -360,7 +389,7 @@ mod platform {
                     (self.pdfium.close_page)(page);
 
                     if EndPage(dc) <= 0 {
-                        return Err("The printer stopped responding.".into());
+                        return Err("打印机停止响应。".into());
                     }
                 }
             }
@@ -411,6 +440,7 @@ mod platform {
         path: PathBuf,
         pages: Vec<u32>,
         sent: bool,
+        temporary: bool,
     }
 
     impl Session {
@@ -419,6 +449,37 @@ mod platform {
                 path: info.path.clone(),
                 pages: target.selection.resolve(info.pages.len() as u32),
                 sent: false,
+                temporary: false,
+            })
+        }
+
+        pub fn begin_current(
+            target: Target,
+            info: &DocInfo,
+            bytes: Vec<u8>,
+        ) -> Result<Self, String> {
+            use std::io::Write;
+            static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+            let path = std::env::temp_dir().join(format!(
+                "folio-print-{}-{}.pdf",
+                std::process::id(),
+                SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            let mut file = std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&path)
+                .map_err(|e| e.to_string())?;
+            if let Err(error) = file.write_all(&bytes) {
+                drop(file);
+                let _ = std::fs::remove_file(&path);
+                return Err(error.to_string());
+            }
+            Ok(Self {
+                path,
+                pages: target.selection.resolve(info.pages.len() as u32),
+                sent: false,
+                temporary: true,
             })
         }
 
@@ -431,18 +492,23 @@ mod platform {
                 .arg("--")
                 .arg(&self.path)
                 .status()
-                .map_err(|_| {
-                    "Printing needs the `lp` command (CUPS), which was not found.".to_owned()
-                })?;
+                .map_err(|_| "打印需要 lp 命令（CUPS），当前未找到。".to_owned())?;
 
             if !status.success() {
-                return Err("The print spooler rejected the document.".into());
+                return Err("打印后台程序拒绝了此文档。".into());
             }
 
             self.sent = true;
 
             let total = self.pages.len() as u32;
             Ok(Some((total, total)))
+        }
+    }
+    impl Drop for Session {
+        fn drop(&mut self) {
+            if self.temporary {
+                let _ = std::fs::remove_file(&self.path);
+            }
         }
     }
 }

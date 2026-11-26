@@ -2,3 +2,8 @@
 # Prebuilt PDFium binaries; fetch with scripts/fetch-pdfium.sh
 /vendor/pdfium
 /dist
+
+# Local collaboration records include workstation paths and private benchmark sources.
+/docs/WORKING_MEMORY.yaml
+/docs/PERFORMANCE.md
+/docs/UPSTREAM_ANALYSIS.md

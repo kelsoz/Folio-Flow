@@ -2,7 +2,7 @@
 ;
 ; Built by scripts/package-windows.sh, which supplies:
 ;   VERSION   the version from Cargo.toml, e.g. 0.1.0
-;   DIST      the directory holding folio.exe, pdfium.dll and the licences
+;   DIST      the directory holding Folio Flow.exe, pdfium.dll and the licences
 ;   ICON      the application icon (.ico)
 ;   OUTFILE   where to write the installer
 ;   PUBLISHER (optional) the name shown as publisher in Windows' app list
@@ -20,16 +20,16 @@ SetCompressor /SOLID lzma
   !error "VERSION is not defined; build with scripts/package-windows.sh"
 !endif
 
-!define NAME "Folio"
-!define EXE "folio.exe"
+!define NAME "Folio Flow"
+!define EXE "Folio Flow.exe"
 !define DESCRIPTION "A fast, minimal PDF reader"
-!define SETTINGS_KEY "Software\Folio"
-!define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\Folio"
+!define SETTINGS_KEY "Software\Folio Flow"
+!define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\Folio Flow"
 !define CLASSES "Software\Classes"
 ; The file type Folio offers itself for. It is added to the "Open with" list
 ; for .pdf; whichever program currently opens PDFs keeps doing so until the
 ; user chooses otherwise.
-!define PROGID "Folio.Document"
+!define PROGID "FolioFlow.Document"
 
 Name "${NAME}"
 OutFile "${OUTFILE}"

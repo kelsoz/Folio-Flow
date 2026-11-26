@@ -5,6 +5,7 @@ mod app;
 mod bench;
 mod engine;
 mod graphics;
+mod motion;
 mod trace;
 mod ui;
 mod web;
@@ -14,21 +15,20 @@ use std::sync::mpsc;
 
 use engine::{Engine, Event};
 
-const USAGE: &str = "\
-Folio — a fast PDF reader
+const USAGE: &str = r#"Folio Flow — 快速 PDF 阅读与页面编辑工具
 
-Usage:
-  folio [FILE]                               Open the reader
-  folio --export-markdown <IN.pdf> <OUT.md>  Convert without opening a window
+用法：
+  "Folio Flow.exe" [文件]                              打开阅读器
+  "Folio Flow.exe" --export-markdown <输入.pdf> <输出.md> 无窗口导出 Markdown
 
-Options:
-  --light                Start in the light theme
-  --page <N>             Open at page N
-  --zoom <PERCENT>       Open at the given zoom
-  --sidebar <MODE>       outline, pages or hidden
-  --print                Open the print dialog once the file has loaded
-  -h, --help             Show this help
-";
+选项：
+  --light                使用亮色模式启动
+  --page <N>             打开第 N 页
+  --zoom <百分比>        指定初始缩放比例
+  --sidebar <模式>       outline（书签）、pages（页面）或 hidden（隐藏）
+  --print                加载文件后打开打印对话框
+  -h, --help             显示帮助
+"#;
 
 fn main() -> iced::Result {
     trace::init();
@@ -68,6 +68,13 @@ fn main() -> iced::Result {
             // scroll through the document for a number of frames and exit;
             // time the engine on a document, without a window.
             "--select-all" => options.select_all = true,
+            "--organizer" => options.organizer = true,
+            "--size" => {
+                options.window_size = args.next().and_then(|value| {
+                    let (width, height) = value.split_once(['x', 'X'])?;
+                    Some(iced::Size::new(width.parse().ok()?, height.parse().ok()?))
+                });
+            }
             "--find" => options.find = args.next(),
             "--screenshot" => options.screenshot = args.next().map(PathBuf::from),
             "--bench" => match args.next() {

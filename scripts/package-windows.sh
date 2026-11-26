@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Cross-compiles the Windows release from Linux/WSL and packages it two ways:
 #
-#   dist/folio-windows-x64/        the files, runnable from anywhere
-#   dist/Folio-<version>-setup.exe the installer
+#   dist/Folio Flow/        the files, runnable from anywhere
+#   dist/Folio Flow-<version>-setup.exe the installer
 #
 # Requires `cargo install cargo-xwin`, and NSIS for the installer
 # (`apt install nsis`). On Debian/Ubuntu without root, NSIS is unpacked into
@@ -11,7 +11,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET=x86_64-pc-windows-msvc
-OUT="$ROOT/dist/folio-windows-x64"
+OUT="$ROOT/dist/Folio Flow"
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -n 1)"
 
 # Prints the makensis command to use, fetching NSIS locally if need be.
@@ -48,7 +48,7 @@ find_makensis() {
 
 rm -rf "$OUT"
 mkdir -p "$OUT"
-cp "$ROOT/target/$TARGET/release/folio.exe" "$OUT/"
+cp "$ROOT/target/$TARGET/release/folio.exe" "$OUT/Folio Flow.exe"
 cp "$ROOT/vendor/pdfium/$TARGET/pdfium.dll" "$OUT/"
 cp "$ROOT/LICENSE" "$OUT/LICENSE.txt"
 cp "$ROOT/vendor/pdfium/$TARGET/LICENSE.pdfium" "$OUT/"
@@ -61,7 +61,7 @@ if ! MAKENSIS="$(find_makensis)"; then
     exit 1
 fi
 
-SETUP="$ROOT/dist/Folio-$VERSION-setup.exe"
+SETUP="$ROOT/dist/Folio Flow-$VERSION-setup.exe"
 
 # shellcheck disable=SC2086  # MAKENSIS may carry an environment prefix.
 $MAKENSIS -V2 -INPUTCHARSET UTF8 \

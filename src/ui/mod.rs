@@ -1,6 +1,11 @@
-//! View composition: toolbar, sidebar, page view and transient overlays.
+//! View composition: floating chrome, sidebar, page views and overlays.
 
+pub mod chrome;
+pub mod dialog;
+pub mod file_drop;
 pub mod icon;
+pub mod order;
+pub mod organizer;
 pub mod sidebar;
 pub mod theme;
 pub mod viewer;
@@ -11,28 +16,30 @@ use iced::advanced::layout::{self, Layout};
 use iced::advanced::renderer;
 use iced::advanced::widget::{Tree, Widget};
 use iced::widget::{
-    button, column, container, mouse_area, progress_bar, row, space, stack, text, text_input,
-    tooltip,
+    button, column, container, mouse_area, progress_bar, responsive, row, space, stack, text,
+    text_input, tooltip,
 };
-use iced::{Center, Element, Fill, Font, Length, Padding, Rectangle, Size, border, font, mouse};
+use iced::{
+    Center, Color, Element, Fill, Font, Length, Padding, Rectangle, Size, border, font, mouse,
+};
 
+use crate::app::ViewMode;
 use crate::app::{App, Find, Message, Tone};
 use crate::graphics;
 use icon::Icon;
 use theme::Palette;
-use viewer::Fit;
 
 /// The interface font: the platform's own where we know its name.
 pub fn font() -> Font {
     if cfg!(target_os = "windows") {
-        Font::with_name("Segoe UI")
+        Font::with_name("Microsoft YaHei UI")
     } else {
         Font::DEFAULT
     }
 }
 
 /// A heavier cut of the interface font for titles.
-fn strong() -> Font {
+pub(crate) fn strong() -> Font {
     Font {
         weight: if cfg!(target_os = "windows") {
             font::Weight::Semibold
@@ -51,7 +58,7 @@ pub fn warm_fonts() {
 
     for font in [font(), strong()] {
         let _ = Paragraph::with_text(text::Text {
-            content: "Folio 0123456789",
+            content: "Folio Flow 0123456789",
             bounds: Size::INFINITE,
             size: theme::TEXT.into(),
             line_height: text::LineHeight::default(),
@@ -64,79 +71,144 @@ pub fn warm_fonts() {
     }
 }
 
-/// The size the page view is given in a window of the given size: what is
-/// left beside the sidebar and below the toolbar, each with its rule.
-pub fn page_view_size(window: Size, sidebar: bool) -> Size {
+/// The size the Reader gets in a window of the given size.
+pub fn page_view_size(window: Size, sidebar_progress: f32) -> Size {
+    let insets = theme::reader_insets(window.width, sidebar_progress);
+
     Size::new(
-        window.width
-            - if sidebar {
-                theme::SIDEBAR_WIDTH + 1.0
-            } else {
-                0.0
-            },
-        window.height - theme::TOOLBAR_HEIGHT - 1.0,
+        (window.width - insets.left - insets.right).max(1.0),
+        (window.height - insets.top - insets.bottom).max(1.0),
     )
 }
 
 pub fn view(app: &App) -> Element<'_, Message> {
+    responsive(move |size| view_at(app, size))
+        .width(Fill)
+        .height(Fill)
+        .into()
+}
+
+fn view_at<'a>(app: &'a App, size: Size) -> Element<'a, Message> {
     let palette = app.palette;
-
-    let content: Element<'_, Message> = if app.viewer.document().is_some() {
-        viewer::view(&app.viewer, palette, Message::Viewer)
-    } else if app.opening.is_some() {
-        // The document is moments away; an invitation to open one would
-        // only flash by.
-        space().into()
-    } else {
-        welcome(app)
-    };
-
-    let main = container(content)
+    let background = container(space())
         .width(Fill)
         .height(Fill)
         .style(move |_| theme::canvas(palette));
 
-    let mut main = stack![main];
+    let mark = container(Element::new(FrameMark))
+        .width(Fill)
+        .height(1)
+        .style(move |_| theme::canvas(palette));
 
-    if app.find.open && app.viewer.document().is_some() {
-        main = main.push(
+    let mut layers = stack![background, mark];
+
+    if app.viewer.document().is_some() {
+        let content: Element<'a, Message> = match app.view_mode {
+            ViewMode::Reader => viewer::view(
+                &app.viewer,
+                palette,
+                app.edit_animation.as_ref(),
+                Message::Viewer,
+            ),
+            ViewMode::Organizer => organizer::view(app),
+        };
+        let padding = match app.view_mode {
+            ViewMode::Reader => theme::reader_insets(size.width, app.motion.sidebar.value),
+            ViewMode::Organizer => Padding {
+                top: theme::content_top(size.width),
+                ..Padding::ZERO
+            },
+        };
+
+        layers = layers.push(container(content).width(Fill).height(Fill).padding(padding));
+    } else if app.opening.is_some() {
+        layers = layers.push(space().width(Fill).height(Fill));
+    } else {
+        layers = layers.push(welcome(app));
+    }
+
+    let veil = app.motion.view_veil();
+    if veil > 0.001 {
+        layers = layers.push(container(space()).width(Fill).height(Fill).style(move |_| {
+            container::Style {
+                background: Some(
+                    Color {
+                        a: veil,
+                        ..palette.canvas
+                    }
+                    .into(),
+                ),
+                ..container::Style::default()
+            }
+        }));
+    }
+
+    let sidebar_progress = app.motion.sidebar.value.clamp(0.0, 1.0);
+    if app.sidebar.open || sidebar_progress > 0.001 {
+        let width = theme::sidebar_width(size.width);
+        let edge = theme::edge(size.width);
+        layers = layers.push(
+            container(sidebar::view(app, width))
+                .width(width + edge)
+                .height(Fill)
+                .align_x(iced::Right)
+                .padding(Padding {
+                    top: theme::content_top(size.width),
+                    right: (1.0 - sidebar_progress) * (width + edge),
+                    bottom: theme::SIDEBAR_BOTTOM,
+                    ..Padding::ZERO
+                }),
+        );
+    }
+
+    layers = layers.push(chrome::view(app, size.width));
+
+    if app.more_open {
+        layers =
+            layers.push(mouse_area(space().width(Fill).height(Fill)).on_press(Message::Escape));
+        layers = layers.push(
+            container(more_menu(app))
+                .width(Fill)
+                .height(Fill)
+                .align_x(Center)
+                .padding(Padding {
+                    top: theme::EDGE + theme::CHROME_HEIGHT + 8.0,
+                    ..Padding::ZERO
+                }),
+        );
+    }
+
+    let find_progress = app.motion.find.value.clamp(0.0, 1.0);
+    if (app.find.open || find_progress > 0.001) && app.viewer.document().is_some() {
+        layers = layers.push(
             container(find_bar(app))
                 .width(Fill)
                 .height(Fill)
                 .align_right(Fill)
-                // Clear of the page view's scrollbar.
-                .padding(Padding::new(12.0).right(22.0)),
+                .padding(Padding {
+                    top: theme::content_top(size.width) + 8.0,
+                    right: theme::edge(size.width) + (1.0 - find_progress) * 420.0,
+                    ..Padding::ZERO
+                }),
         );
     }
 
     if let Some(toast) = &app.toast {
-        main = main.push(
+        layers = layers.push(
             container(toast_view(palette, toast))
                 .width(Fill)
                 .height(Fill)
                 .align_x(Center)
                 .align_bottom(Fill)
-                .padding(24),
+                .padding(theme::edge(size.width)),
         );
     }
 
-    let main: Element<'_, Message> = main.into();
+    if app.dialog.is_some() {
+        layers = layers.push(dialog::view(app, size));
+    }
 
-    let body: Element<'_, Message> = if app.sidebar.open {
-        row![sidebar::view(app), vertical_rule(palette), main].into()
-    } else {
-        main
-    };
-
-    column![toolbar(app), horizontal_rule(palette), body].into()
-}
-
-/// The rule under the toolbar. It is in every frame, whatever else is
-/// showing, which makes it the place to mark the start of one.
-fn horizontal_rule<'a>(palette: Palette) -> Element<'a, Message> {
-    container(Element::new(FrameMark))
-        .style(move |_| theme::rule(palette))
-        .into()
+    layers.into()
 }
 
 /// A pixel-high strip that draws nothing, and tells the graphics module that
@@ -171,13 +243,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for FrameMark {
     }
 }
 
-fn vertical_rule<'a>(palette: Palette) -> Element<'a, Message> {
-    container(space().width(1).height(Fill))
-        .style(move |_| theme::rule(palette))
-        .into()
-}
-
-fn hint<'a>(palette: Palette, label: &'a str) -> Element<'a, Message> {
+pub(crate) fn hint<'a>(palette: Palette, label: &'a str) -> Element<'a, Message> {
     container(text(label).size(theme::TEXT_SMALL))
         .padding([5, 9])
         .style(move |_| theme::popover(palette))
@@ -186,7 +252,7 @@ fn hint<'a>(palette: Palette, label: &'a str) -> Element<'a, Message> {
 
 /// A square toolbar button. `active` marks a toggled state; a `None`
 /// message disables it.
-fn tool<'a>(
+pub(crate) fn tool<'a>(
     palette: Palette,
     icon: Icon,
     label: &'a str,
@@ -195,7 +261,7 @@ fn tool<'a>(
 ) -> Element<'a, Message> {
     let color = match (&message, active) {
         (None, _) => palette.faint,
-        (_, true) => palette.accent,
+        (_, true) => palette.on_accent,
         _ => palette.muted,
     };
 
@@ -212,181 +278,65 @@ fn tool<'a>(
     .into()
 }
 
-fn toolbar(app: &App) -> Element<'_, Message> {
+fn more_menu(app: &App) -> Element<'_, Message> {
     let palette = app.palette;
-    let doc = app.viewer.document();
-    let when_open = |message: Message| doc.is_some().then_some(message);
+    let busy = app.document_busy();
+    let has_target = !app.target_slots().is_empty();
 
-    let title: Element<'_, Message> = match (doc, &app.opening) {
-        (_, Some(path)) => text(format!(
-            "Opening {}…",
-            path.file_name().unwrap_or_default().to_string_lossy()
-        ))
-        .size(theme::TEXT)
-        .color(palette.muted)
-        .wrapping(text::Wrapping::None)
-        .into(),
-        (Some(doc), None) => text(doc.title.as_str())
-            .size(theme::TEXT)
-            .font(strong())
-            .color(palette.text)
-            .wrapping(text::Wrapping::None)
-            .into(),
-        (None, None) => space().into(),
-    };
-
-    let left = row![
-        tool(
-            palette,
-            Icon::Sidebar,
-            "Sidebar  Ctrl+B",
-            Some(Message::ToggleSidebar),
-            app.sidebar.open,
-        ),
-        tool(
-            palette,
-            Icon::Open,
-            "Open  Ctrl+O",
-            Some(Message::OpenDialog),
-            false
-        ),
-        space().width(6),
-        container(title).width(Fill).clip(true),
-    ]
-    .spacing(2)
-    .align_y(Center)
-    .width(Fill);
-
-    let pages = row![
-        text_input("", &app.page_input)
-            .on_input_maybe(doc.is_some().then_some(Message::PageInput))
-            .on_submit(Message::PageSubmit)
-            .size(theme::TEXT)
-            .padding([4, 6])
-            .width(52)
-            .align_x(Center)
-            .style(move |_, status| theme::input(palette, status)),
-        text(format!("of {}", app.viewer.page_count().max(1)))
-            .size(theme::TEXT)
-            .color(palette.muted),
-    ]
-    .spacing(8)
-    .align_y(Center);
-
-    let zoom_label = button(
-        container(
-            text(format!("{:.0}%", app.viewer.zoom() * 100.0))
-                .size(theme::TEXT)
-                .color(if doc.is_some() {
-                    palette.text
-                } else {
-                    palette.faint
-                }),
-        )
-        .center_x(52)
-        .center_y(theme::CONTROL),
-    )
-    .padding(0)
-    .on_press_maybe(when_open(Message::ZoomReset))
-    .style(move |_, status| theme::ghost_button(palette, status, false));
-
-    let zoom = row![
-        tool(
-            palette,
-            Icon::ZoomOut,
-            "Zoom out  Ctrl+−",
-            when_open(Message::Zoom(-1)),
-            false
-        ),
-        tooltip(
-            zoom_label,
-            hint(palette, "Actual size  Ctrl+0"),
-            tooltip::Position::Bottom
-        )
-        .gap(8)
-        .delay(Duration::from_millis(450)),
-        tool(
-            palette,
-            Icon::ZoomIn,
-            "Zoom in  Ctrl++",
-            when_open(Message::Zoom(1)),
-            false
-        ),
-        space().width(4),
-        tool(
-            palette,
-            Icon::FitWidth,
-            "Fit width  Ctrl+1",
-            when_open(Message::Fit(Fit::Width)),
-            doc.is_some() && app.viewer.fit() == Fit::Width,
-        ),
-        tool(
-            palette,
-            Icon::FitPage,
-            "Fit page  Ctrl+2",
-            when_open(Message::Fit(Fit::Page)),
-            doc.is_some() && app.viewer.fit() == Fit::Page,
-        ),
-    ]
-    .spacing(2)
-    .align_y(Center);
-
-    let divider = container(space().width(1).height(18)).style(move |_| theme::rule(palette));
-
-    let centre = row![pages, space().width(10), divider, space().width(8), zoom].align_y(Center);
-
-    let right = container(
-        row![
-            tool(
+    container(
+        column![
+            menu_item(
+                "保存",
+                "Ctrl+S",
+                (!busy && app.edits.dirty()).then_some(Message::Save),
                 palette,
-                Icon::Search,
-                "Find  Ctrl+F",
-                when_open(Message::Find),
-                app.find.open,
             ),
-            tool(
+            menu_item(
+                "另存为",
+                "Ctrl+Shift+S",
+                (!busy).then_some(Message::SaveAs),
                 palette,
-                Icon::Export,
-                "Export as Markdown  Ctrl+E",
-                when_open(Message::Export),
-                false,
             ),
-            tool(
+            menu_item("压缩 PDF", "", (!busy).then_some(Message::Compact), palette,),
+            menu_item(
+                "提取页面",
+                "",
+                (!busy && has_target).then_some(Message::Extract),
                 palette,
-                Icon::Print,
-                "Print  Ctrl+P",
-                when_open(Message::Print),
-                false
-            ),
-            space().width(4),
-            tool(
-                palette,
-                if palette.is_dark {
-                    Icon::Sun
-                } else {
-                    Icon::Moon
-                },
-                if palette.is_dark {
-                    "Light theme"
-                } else {
-                    "Dark theme"
-                },
-                Some(Message::ToggleTheme),
-                false,
             ),
         ]
         .spacing(2)
+        .width(220),
+    )
+    .padding(6)
+    .style(move |_| theme::popover(palette))
+    .into()
+}
+
+fn menu_item<'a>(
+    label: &'a str,
+    shortcut: &'a str,
+    message: Option<Message>,
+    palette: Palette,
+) -> Element<'a, Message> {
+    let color = if message.is_some() {
+        palette.text
+    } else {
+        palette.faint
+    };
+    button(
+        row![
+            text(label).size(theme::TEXT_SMALL).color(color),
+            space().width(Fill),
+            text(shortcut).size(11).color(palette.muted),
+        ]
         .align_y(Center),
     )
+    .padding([7, 9])
     .width(Fill)
-    .align_right(Fill);
-
-    container(row![left, centre, right].spacing(12).align_y(Center))
-        .padding([0, 8])
-        .height(theme::TOOLBAR_HEIGHT)
-        .align_y(Center)
-        .style(move |_| theme::surface(palette))
-        .into()
+    .on_press_maybe(message)
+    .style(move |_, status| theme::ghost_button(palette, status, false))
+    .into()
 }
 
 /// The find bar, floating over the top right of the page view.
@@ -398,13 +348,13 @@ fn find_bar(app: &App) -> Element<'_, Message> {
 
     let (status, color) = match (count, app.viewer.current_match()) {
         (0, _) if find.query.trim().is_empty() => (String::new(), palette.muted),
-        (0, _) if find.searching => ("Searching…".into(), palette.muted),
-        (0, _) => ("No results".into(), palette.danger),
+        (0, _) if find.searching => ("正在查找…".into(), palette.muted),
+        (0, _) => ("未找到结果".into(), palette.danger),
         (_, Some(current)) => (format!("{current} of {count}{more}"), palette.muted),
         (_, None) => (format!("{count}{more}"), palette.muted),
     };
 
-    let field = text_input("Find in document", &find.query)
+    let field = text_input("在文档中查找", &find.query)
         .id(Find::FIELD)
         .on_input(Message::FindInput)
         .on_submit(Message::FindSubmit)
@@ -424,7 +374,7 @@ fn find_bar(app: &App) -> Element<'_, Message> {
                 text(status)
                     .size(theme::TEXT_SMALL)
                     .color(color)
-                    .wrapping(text::Wrapping::None)
+                    .wrapping(text::Wrapping::None),
             )
             .width(96)
             .align_x(iced::Right)
@@ -432,17 +382,17 @@ fn find_bar(app: &App) -> Element<'_, Message> {
             tool(
                 palette,
                 Icon::ChevronUp,
-                "Previous  Shift+Enter",
+                "上一个  Shift+Enter",
                 step(-1),
-                false
+                false,
             ),
-            tool(palette, Icon::ChevronDown, "Next  Enter", step(1), false),
+            tool(palette, Icon::ChevronDown, "下一个  Enter", step(1), false),
             tool(
                 palette,
                 Icon::Close,
-                "Close  Esc",
+                "关闭  Esc",
                 Some(Message::Escape),
-                false
+                false,
             ),
         ]
         .spacing(2)
@@ -451,14 +401,13 @@ fn find_bar(app: &App) -> Element<'_, Message> {
     .padding(Padding::new(6.0).left(10.0))
     .style(move |_| theme::popover(palette));
 
-    // Clicks on the bar itself stay off the page beneath it.
     mouse_area(bar).interaction(mouse::Interaction::Idle).into()
 }
 
 fn welcome(app: &App) -> Element<'_, Message> {
     let palette = app.palette;
 
-    let open = button(text("Open a PDF").size(theme::TEXT).font(strong()))
+    let open = button(text("打开 PDF").size(theme::TEXT).font(strong()))
         .padding([8, 16])
         .on_press(Message::OpenDialog)
         .style(move |_, status| theme::primary_button(palette, status));
@@ -467,11 +416,11 @@ fn welcome(app: &App) -> Element<'_, Message> {
         column![
             Icon::Document.view(40.0, palette.faint),
             space().height(6),
-            text("No document open")
+            text("尚未打开文档")
                 .size(17)
                 .font(strong())
                 .color(palette.text),
-            text("Drop a PDF here, or press Ctrl+O")
+            text("将 PDF 拖到此处，或按 Ctrl+O 打开")
                 .size(theme::TEXT)
                 .color(palette.muted),
             space().height(10),
@@ -498,7 +447,7 @@ fn toast_view<'a>(palette: Palette, toast: &'a crate::app::Toast) -> Element<'a,
                 progress_bar::Style {
                     background: palette.hover.into(),
                     bar: palette.accent.into(),
-                    border: border::rounded(2.0),
+                    border: border::rounded(theme::PROGRESS_RADIUS),
                 }
             }))
             .width(220),
@@ -525,23 +474,78 @@ mod tests {
     use std::sync::Arc;
     use std::time::Instant;
 
-    use iced::window;
+    use iced::{Point, window};
 
     use super::*;
     use crate::app::Options;
     use crate::engine::{DocInfo, PageSize};
     use crate::ui::viewer::Interaction;
 
+    #[test]
+    fn pages_sidebar_routes_wheel_events_by_pointer_location() {
+        let window = Size::new(1360.0, 870.0);
+        let (mut app, _) = App::boot(Options::default());
+        app.sidebar.open = true;
+        app.sidebar.show(sidebar::Tab::Pages);
+        app.motion.sidebar.value = 1.0;
+        app.motion.sidebar.target = 1.0;
+        app.viewer.set_document(Arc::new(DocInfo {
+            id: 1,
+            path: PathBuf::new(),
+            title: String::new(),
+            pages: vec![
+                PageSize {
+                    width: 612.0,
+                    height: 792.0,
+                };
+                20
+            ],
+            outline: Vec::new(),
+        }));
+
+        for (point, in_sidebar) in [
+            (Point::new(700.0, 400.0), false),
+            (Point::new(100.0, 400.0), true),
+        ] {
+            let mut ui =
+                iced_test::Simulator::with_size(iced::Settings::default(), window, app.view());
+            let wheel = iced::Event::Mouse(mouse::Event::WheelScrolled {
+                delta: mouse::ScrollDelta::Lines { x: 0.0, y: -1.0 },
+            });
+
+            ui.point_at(point);
+            ui.simulate([iced::Event::Window(window::Event::RedrawRequested(
+                Instant::now(),
+            ))]);
+            ui.simulate([wheel]);
+
+            let messages: Vec<_> = ui.into_messages().collect();
+            let reader_scrolls = messages
+                .iter()
+                .filter(|message| matches!(message, Message::Viewer(Interaction::Scrolled { .. })))
+                .count();
+            let sidebar_scrolls = messages
+                .iter()
+                .filter(|message| matches!(message, Message::SidebarPagesScrolled(_)))
+                .count();
+            let expected = if in_sidebar { (0, 1) } else { (1, 0) };
+
+            assert_eq!((reader_scrolls, sidebar_scrolls), expected, "{messages:?}");
+        }
+    }
+
     /// Start-up renders the first screen before there is a window to lay
     /// out, so what it assumes about the layout has to hold.
     #[test]
     fn page_view_size_is_where_the_layout_puts_it() {
-        let window = Size::new(1180.0, 840.0);
+        let window = Size::new(1360.0, 870.0);
 
         for sidebar in [true, false] {
             let (mut app, _) = App::boot(Options::default());
 
             app.sidebar.open = sidebar;
+            app.motion.sidebar.value = if sidebar { 1.0 } else { 0.0 };
+            app.motion.sidebar.target = app.motion.sidebar.value;
             app.viewer.set_document(Arc::new(DocInfo {
                 id: 1,
                 path: PathBuf::new(),
@@ -571,7 +575,7 @@ mod tests {
                 })
                 .collect();
 
-            assert_eq!(sizes, [page_view_size(window, sidebar)]);
+            assert_eq!(sizes, [page_view_size(window, app.motion.sidebar.value)]);
         }
     }
 }

@@ -9,6 +9,7 @@
 
 pub mod markdown;
 pub mod print;
+pub mod raster;
 pub mod table;
 pub mod text;
 mod worker;
@@ -29,7 +30,7 @@ pub use text::{Anchor, Granularity, Link, PageText, Rect, Target};
 pub const TILE: u32 = 510;
 
 /// Width in device pixels of page thumbnails.
-pub const THUMBNAIL_WIDTH: u32 = 200;
+pub const THUMBNAIL_WIDTH: u32 = 640;
 
 /// A search stops after this many matches: beyond it nobody is stepping
 /// through them, and the list would only cost memory.
@@ -109,11 +110,26 @@ pub struct Match {
 pub enum JobKind {
     Export,
     Print,
+    Save,
+    Extract,
+    Compact,
+    Raster,
 }
 
 #[derive(Debug)]
 pub enum Event {
     Opened(Arc<DocInfo>),
+    Edited(Arc<DocInfo>),
+    Imported {
+        info: Arc<DocInfo>,
+        first_source: u32,
+        count: u32,
+        slot: u32,
+    },
+    EditFailed {
+        doc: u64,
+        error: String,
+    },
     OpenFailed {
         path: PathBuf,
         error: String,
@@ -153,6 +169,25 @@ pub enum Event {
         capped: bool,
     },
     Exported(PathBuf),
+    RasterEstimated {
+        doc: u64,
+        request: u64,
+        bytes: Result<u64, String>,
+    },
+    Saved {
+        info: Arc<DocInfo>,
+        path: PathBuf,
+    },
+    Extracted {
+        path: PathBuf,
+        pages: u32,
+    },
+    Compacted {
+        path: PathBuf,
+        before: u64,
+        after: u64,
+        replaced: bool,
+    },
     Printed,
     JobFailed {
         kind: JobKind,
@@ -195,14 +230,50 @@ pub(crate) struct SearchRequest {
     pub from: u32,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct EditRequest {
+    pub doc: u64,
+    pub sources: Vec<u32>,
+    pub rotations: Vec<(u32, u8)>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ImportRequest {
+    pub edit: EditRequest,
+    pub path: PathBuf,
+    pub slot: u32,
+}
+
 pub(crate) enum Job {
-    Export { dest: PathBuf },
+    Raster {
+        dest: PathBuf,
+        settings: raster::Settings,
+    },
+    Estimate {
+        request: u64,
+        settings: raster::Settings,
+    },
+    Export {
+        dest: PathBuf,
+    },
     Print(print::Target),
+    Save {
+        dest: PathBuf,
+    },
+    Extract {
+        dest: PathBuf,
+        pages: Vec<u32>,
+    },
+    Compact {
+        dest: PathBuf,
+    },
 }
 
 #[derive(Default)]
 pub(crate) struct Queue {
     pub open: Option<Open>,
+    pub edit: Option<EditRequest>,
+    pub import: Option<ImportRequest>,
     /// The document `wanted` was drawn up for.
     pub doc: u64,
     pub wanted: Wanted,
@@ -273,6 +344,8 @@ impl Engine {
             queue.wanted = Wanted::default();
             queue.copy = None;
             queue.search = None;
+            queue.edit = None;
+            queue.import = None;
             queue.jobs.clear();
         });
     }
@@ -306,12 +379,45 @@ impl Engine {
         self.with_queue(|queue| queue.search = Some(SearchRequest { id, query, from }));
     }
 
+    pub fn import_pages(&self, request: ImportRequest) {
+        self.with_queue(|queue| queue.import = Some(request));
+    }
+
+    pub fn apply_edit(&self, request: EditRequest) {
+        self.with_queue(|queue| queue.edit = Some(request));
+    }
+
+    pub fn export_raster(&self, dest: PathBuf, settings: raster::Settings) {
+        self.with_queue(|queue| queue.jobs.push_back(Job::Raster { dest, settings }));
+    }
+
+    pub fn estimate_raster(&self, request: u64, settings: raster::Settings) {
+        self.with_queue(|queue| {
+            queue
+                .jobs
+                .retain(|job| !matches!(job, Job::Estimate { .. }));
+            queue.jobs.push_back(Job::Estimate { request, settings });
+        });
+    }
+
     pub fn export_markdown(&self, dest: PathBuf) {
         self.with_queue(|queue| queue.jobs.push_back(Job::Export { dest }));
     }
 
     pub fn print(&self, target: print::Target) {
         self.with_queue(|queue| queue.jobs.push_back(Job::Print(target)));
+    }
+
+    pub fn save(&self, dest: PathBuf) {
+        self.with_queue(|queue| queue.jobs.push_back(Job::Save { dest }));
+    }
+
+    pub fn extract(&self, dest: PathBuf, pages: Vec<u32>) {
+        self.with_queue(|queue| queue.jobs.push_back(Job::Extract { dest, pages }));
+    }
+
+    pub fn compact(&self, dest: PathBuf) {
+        self.with_queue(|queue| queue.jobs.push_back(Job::Compact { dest }));
     }
 }
 
@@ -345,6 +451,9 @@ pub(crate) mod tests {
                 if let Event::OpenFailed { error, .. } | Event::JobFailed { error, .. } = &event {
                     panic!("engine reported: {error}");
                 }
+                if let Event::EditFailed { error, .. } = &event {
+                    panic!("engine reported: {error}");
+                }
 
                 if let Some(value) = pick(event) {
                     return value;
@@ -371,12 +480,16 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn open_fixture() -> Fixture {
+        open_path(fixture_path())
+    }
+
+    pub(crate) fn open_path(path: PathBuf) -> Fixture {
         let (sender, events) = mpsc::channel();
         let engine = Engine::spawn(move |event| {
             let _ = sender.send(event);
         });
 
-        engine.open(fixture_path(), None);
+        engine.open(path, None);
 
         let mut fixture = Fixture {
             engine,
@@ -396,6 +509,36 @@ pub(crate) mod tests {
         });
 
         fixture
+    }
+
+    fn disposable_fixture() -> PathBuf {
+        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("folio-edit-{}-{sequence}.pdf", std::process::id()));
+        std::fs::write(&path, include_bytes!("../../tests/fixtures/sample.pdf"))
+            .expect("write disposable fixture");
+        path
+    }
+
+    fn page_text(fixture: &Fixture, doc: &DocInfo, page: u32) -> String {
+        fixture.engine.want(
+            doc.id,
+            Wanted {
+                texts: vec![page],
+                ..Wanted::default()
+            },
+        );
+        fixture
+            .wait(|event| match event {
+                Event::Text {
+                    page: answered,
+                    text,
+                    ..
+                } if answered == page => Some(text),
+                _ => None,
+            })
+            .text(0..u32::MAX)
     }
 
     #[test]
@@ -423,6 +566,247 @@ pub(crate) mod tests {
             outline,
             [("Introduction", 0, Some(0)), ("Results", 0, Some(1))]
         );
+    }
+
+    #[test]
+    fn edits_reorder_rotate_and_delete_pages() {
+        let fixture = open_fixture();
+        let original = fixture.doc.clone();
+        let texts: Vec<_> = (0..3)
+            .map(|page| page_text(&fixture, &original, page))
+            .collect();
+
+        fixture.engine.apply_edit(EditRequest {
+            doc: original.id,
+            sources: vec![2, 0],
+            rotations: Vec::new(),
+        });
+        let edited = fixture.wait(|event| match event {
+            Event::Edited(doc) => Some(doc),
+            _ => None,
+        });
+
+        assert_eq!(edited.pages.len(), 2);
+        assert_eq!(page_text(&fixture, &edited, 0), texts[2]);
+        assert_eq!(page_text(&fixture, &edited, 1), texts[0]);
+        let outline: Vec<_> = edited
+            .outline
+            .iter()
+            .map(|item| (item.title.as_str(), item.depth, item.page))
+            .collect();
+        assert_eq!(outline, [("Introduction", 0, Some(1))]);
+    }
+
+    #[test]
+    fn saves_over_the_open_pdf_and_reopens_it() {
+        let path = disposable_fixture();
+        let fixture = open_path(path.clone());
+        let original = fixture.doc.clone();
+
+        fixture.engine.apply_edit(EditRequest {
+            doc: original.id,
+            sources: vec![2, 1, 0],
+            rotations: vec![(2, 1)],
+        });
+        let edited = fixture.wait(|event| match event {
+            Event::Edited(doc) => Some(doc),
+            _ => None,
+        });
+        let expected = page_text(&fixture, &edited, 0);
+
+        fixture.engine.save(path.clone());
+        fixture.wait(|event| match event {
+            Event::Saved { info, path: saved } => {
+                assert_eq!(saved, path);
+                Some(info)
+            }
+            _ => None,
+        });
+        drop(fixture);
+
+        let reopened = open_path(path);
+        assert_eq!(reopened.doc.pages.len(), 3);
+        assert!(reopened.doc.pages[0].width > reopened.doc.pages[0].height);
+        assert_eq!(page_text(&reopened, &reopened.doc, 0), expected);
+    }
+
+    #[test]
+    fn rotation_save_preserves_document_metadata() {
+        let path = disposable_fixture();
+        let fixture = open_path(path.clone());
+        let original = fixture.doc.clone();
+        fixture.engine.apply_edit(EditRequest {
+            doc: original.id,
+            sources: (0..original.pages.len() as u32).collect(),
+            rotations: vec![(0, 1)],
+        });
+        fixture.wait(|event| match event {
+            Event::Edited(_) => Some(()),
+            _ => None,
+        });
+        fixture.engine.save(path.clone());
+        fixture.wait(|event| match event {
+            Event::Saved { .. } => Some(()),
+            _ => None,
+        });
+        drop(fixture);
+
+        let reopened = open_path(path);
+        assert_eq!(reopened.doc.title, "Sample Document");
+        let outline: Vec<_> = reopened
+            .doc
+            .outline
+            .iter()
+            .map(|item| (item.title.as_str(), item.depth, item.page))
+            .collect();
+        assert_eq!(
+            outline,
+            [("Introduction", 0, Some(0)), ("Results", 0, Some(1))]
+        );
+    }
+
+    #[test]
+    fn saves_as_and_extracts_selected_pages() {
+        let fixture = open_fixture();
+        let original = fixture.doc.clone();
+        let first = page_text(&fixture, &original, 0);
+        let last = page_text(&fixture, &original, 2);
+        let sequence = std::sync::atomic::AtomicU64::new(1);
+        let stem = std::env::temp_dir().join(format!("folio-write-{}", std::process::id()));
+        let saved = stem.with_extension("pdf");
+        let extracted = std::env::temp_dir().join(format!(
+            "folio-extract-{}-{}.pdf",
+            std::process::id(),
+            sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+
+        fixture.engine.apply_edit(EditRequest {
+            doc: original.id,
+            sources: vec![2, 0, 1],
+            rotations: Vec::new(),
+        });
+        fixture.wait(|event| match event {
+            Event::Edited(_) => Some(()),
+            _ => None,
+        });
+        fixture.engine.save(saved.clone());
+        fixture.wait(|event| match event {
+            Event::Saved { path, .. } => Some(path),
+            _ => None,
+        });
+        fixture.engine.extract(extracted.clone(), vec![1, 0]);
+        let count = fixture.wait(|event| match event {
+            Event::Extracted { path, pages } => {
+                assert_eq!(path, extracted);
+                Some(pages)
+            }
+            _ => None,
+        });
+        assert_eq!(count, 2);
+        drop(fixture);
+
+        let saved_doc = open_path(saved);
+        assert_eq!(page_text(&saved_doc, &saved_doc.doc, 0), last);
+        assert_eq!(page_text(&saved_doc, &saved_doc.doc, 1), first);
+        drop(saved_doc);
+
+        let extracted_doc = open_path(extracted);
+        assert_eq!(extracted_doc.doc.pages.len(), 2);
+        assert_eq!(page_text(&extracted_doc, &extracted_doc.doc, 0), first);
+        assert_eq!(page_text(&extracted_doc, &extracted_doc.doc, 1), last);
+    }
+
+    #[test]
+    fn real_pdf_roundtrip_when_requested() {
+        let Some(source) = std::env::var_os("FOLIO_REAL_PDF") else {
+            return;
+        };
+        let source = PathBuf::from(source);
+        let source_len = std::fs::metadata(&source).unwrap().len();
+        let path = std::env::temp_dir().join(format!("folio-real-{}.pdf", std::process::id()));
+        std::fs::copy(&source, &path).expect("copy real PDF for destructive testing");
+        let fixture = open_path(path.clone());
+        let original = fixture.doc.clone();
+        assert!(original.pages.len() >= 3);
+        let first = page_text(&fixture, &original, 0);
+        let middle_page = original.pages.len() as u32 / 2;
+        let middle = page_text(&fixture, &original, middle_page);
+        let last_page = original.pages.len() as u32 - 1;
+        let last_size = original.pages[last_page as usize];
+
+        fixture.engine.apply_edit(EditRequest {
+            doc: original.id,
+            sources: vec![last_page, 0, middle_page],
+            rotations: vec![(last_page, 1)],
+        });
+        let edited = fixture.wait(|event| match event {
+            Event::Edited(doc) => Some(doc),
+            _ => None,
+        });
+        assert_eq!(edited.pages.len(), 3);
+        assert!(
+            (edited.pages[0].width - last_size.height).abs() < 2.0
+                && (edited.pages[0].height - last_size.width).abs() < 2.0
+        );
+        assert_eq!(page_text(&fixture, &edited, 1), first);
+        assert_eq!(page_text(&fixture, &edited, 2), middle);
+
+        fixture.engine.save(path.clone());
+        fixture.wait(|event| match event {
+            Event::Saved { path: saved, .. } => Some(saved),
+            _ => None,
+        });
+        drop(fixture);
+
+        let reopened = open_path(path.clone());
+        assert_eq!(reopened.doc.pages.len(), 3);
+        assert_eq!(page_text(&reopened, &reopened.doc, 1), first);
+        assert_eq!(page_text(&reopened, &reopened.doc, 2), middle);
+        assert!(
+            (reopened.doc.pages[0].width - last_size.height).abs() < 2.0
+                && (reopened.doc.pages[0].height - last_size.width).abs() < 2.0
+        );
+
+        let extracted =
+            std::env::temp_dir().join(format!("folio-real-extracted-{}.pdf", std::process::id()));
+        reopened.engine.extract(extracted.clone(), vec![1, 2]);
+        reopened.wait(|event| match event {
+            Event::Extracted { path, pages } => Some((path, pages)),
+            _ => None,
+        });
+        drop(reopened);
+
+        let extracted_doc = open_path(extracted);
+        assert_eq!(extracted_doc.doc.pages.len(), 2);
+        assert_eq!(page_text(&extracted_doc, &extracted_doc.doc, 0), first);
+        assert_eq!(page_text(&extracted_doc, &extracted_doc.doc, 1), middle);
+        assert_eq!(std::fs::metadata(&source).unwrap().len(), source_len);
+    }
+
+    #[test]
+    fn compacts_to_a_readable_pdf_copy() {
+        let fixture = open_fixture();
+        let path = std::env::temp_dir().join(format!("folio-compact-{}.pdf", std::process::id()));
+        fixture.engine.compact(path.clone());
+        let (before, after) = fixture.wait(|event| match event {
+            Event::Compacted {
+                path: saved,
+                before,
+                after,
+                replaced,
+            } => {
+                assert_eq!(saved, path);
+                assert!(replaced);
+                Some((before, after))
+            }
+            _ => None,
+        });
+        assert!(before > 0);
+        assert!(after > 0);
+        drop(fixture);
+
+        let compacted = open_path(path);
+        assert_eq!(compacted.doc.pages.len(), 3);
     }
 
     #[test]
@@ -963,6 +1347,339 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn raster_exports_preserve_edited_geometry_and_remove_pdf_text() {
+        use raster::{Format, Settings};
+        let mut fixture = open_fixture();
+        let mut sources: Vec<_> = (0..fixture.doc.pages.len() as u32).collect();
+        sources.reverse();
+        fixture.engine.apply_edit(EditRequest {
+            doc: fixture.doc.id,
+            sources: sources.clone(),
+            rotations: vec![(sources[0], 1)],
+        });
+        fixture.doc = fixture.wait(|event| {
+            if let Event::Edited(info) = event {
+                Some(info)
+            } else {
+                None
+            }
+        });
+        let root = std::env::temp_dir().join(format!("folio-raster-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        for format in [Format::Png, Format::Jpg, Format::Pdf] {
+            let settings = Settings {
+                format,
+                dpi: 108.0,
+                quality: 75,
+            };
+            let dest = root.join(format!("{format:?}"));
+            fixture.engine.export_raster(dest.clone(), settings);
+            let exported = fixture.wait(|event| {
+                if let Event::Exported(path) = event {
+                    Some(path)
+                } else {
+                    None
+                }
+            });
+            assert_eq!(exported, dest);
+            if format == Format::Pdf {
+                let copy = open_path(dest.clone());
+                assert_eq!(copy.doc.pages, fixture.doc.pages);
+                assert!(copy.doc.outline.is_empty());
+                for page in 0..copy.doc.pages.len() as u32 {
+                    assert!(page_text(&copy, &copy.doc, page).trim().is_empty());
+                }
+                drop(copy);
+                std::fs::remove_file(&dest).unwrap();
+            } else {
+                assert_eq!(
+                    std::fs::read_dir(&dest).unwrap().count(),
+                    fixture.doc.pages.len()
+                );
+                let extension = if format == Format::Png { "png" } else { "jpg" };
+                for (index, size) in fixture.doc.pages.iter().enumerate() {
+                    let path = dest.join(format!("第{:04}页.{extension}", index + 1));
+                    let decoded = image::open(&path).unwrap();
+                    assert_eq!(
+                        (decoded.width(), decoded.height()),
+                        settings.dimensions(*size).unwrap()
+                    );
+                    assert!(
+                        decoded
+                            .into_rgb8()
+                            .pixels()
+                            .any(|pixel| pixel.0.iter().any(|channel| *channel < 180))
+                    );
+                    std::fs::remove_file(path).unwrap();
+                }
+                std::fs::remove_dir(dest).unwrap();
+            }
+        }
+        let settings = Settings {
+            format: Format::Pdf,
+            dpi: 144.0,
+            quality: 75,
+        };
+        fixture.engine.estimate_raster(42, settings);
+        let (request, bytes) = fixture.wait(|event| {
+            if let Event::RasterEstimated { request, bytes, .. } = event {
+                Some((request, bytes))
+            } else {
+                None
+            }
+        });
+        assert_eq!(request, 42);
+        assert!(bytes.unwrap() > 4096);
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn failed_replace_keeps_unsaved_edits_for_retry() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let path = disposable_fixture();
+        let mut fixture = open_path(path.clone());
+        let expected = page_text(&fixture, &fixture.doc, 2);
+        fixture.engine.apply_edit(EditRequest {
+            doc: fixture.doc.id,
+            sources: vec![2, 1, 0],
+            rotations: vec![],
+        });
+        fixture.doc = fixture.wait(|event| {
+            if let Event::Edited(info) = event {
+                Some(info)
+            } else {
+                None
+            }
+        });
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&path)
+            .unwrap();
+        fixture.engine.save(path.clone());
+        loop {
+            let event = fixture
+                .events
+                .recv_timeout(Duration::from_secs(20))
+                .unwrap();
+            if let Event::JobFailed { kind, .. } = event {
+                assert_eq!(kind, JobKind::Save);
+                break;
+            }
+        }
+        assert_eq!(page_text(&fixture, &fixture.doc, 0), expected);
+        drop(lock);
+        fixture.engine.save(path.clone());
+        fixture.wait(|event| {
+            if let Event::Saved { path, .. } = event {
+                Some(path)
+            } else {
+                None
+            }
+        });
+        drop(fixture);
+        let reopened = open_path(path.clone());
+        assert_eq!(page_text(&reopened, &reopened.doc, 0), expected);
+        drop(reopened);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn imported_images_survive_undo_redo_and_save_without_the_input_file() {
+        let mut fixture = open_fixture();
+        let image_path =
+            std::env::temp_dir().join(format!("folio-import-{}.png", std::process::id()));
+        let output_path = image_path.with_extension("pdf");
+        image::RgbImage::from_fn(80, 40, |x, _| {
+            if x < 40 {
+                image::Rgb([230, 20, 30])
+            } else {
+                image::Rgb([10, 50, 220])
+            }
+        })
+        .save(&image_path)
+        .unwrap();
+        fixture.engine.import_pages(ImportRequest {
+            edit: EditRequest {
+                doc: fixture.doc.id,
+                sources: vec![0, 1, 2],
+                rotations: vec![],
+            },
+            path: image_path.clone(),
+            slot: 1,
+        });
+        let (info, first, count) = fixture.wait(|event| match event {
+            Event::Imported {
+                info,
+                first_source,
+                count,
+                slot,
+            } => {
+                assert_eq!(slot, 1);
+                Some((info, first_source, count))
+            }
+            _ => None,
+        });
+        fixture.doc = info;
+        assert_eq!((first, count), (3, 1));
+        assert_eq!(fixture.doc.pages.len(), 4);
+        assert_eq!(
+            fixture.doc.pages[1],
+            PageSize {
+                width: 80.0,
+                height: 40.0
+            }
+        );
+        std::fs::remove_file(&image_path).unwrap();
+        #[cfg(windows)]
+        {
+            let printed = output_path
+                .with_file_name(format!("folio-insert-print-{}.pdf", std::process::id()));
+            let target = print::Target::printer(
+                "Microsoft Print to PDF",
+                print::Selection::Pages(vec![1]),
+                Some(printed.clone()),
+            )
+            .unwrap();
+            fixture.engine.print(target);
+            fixture.wait(|event| {
+                if matches!(event, Event::Printed) {
+                    Some(())
+                } else {
+                    None
+                }
+            });
+            let check = open_path(printed.clone());
+            assert_eq!(check.doc.pages.len(), 1);
+            assert!(
+                page_text(&check, &check.doc, 0).trim().is_empty(),
+                "the inserted image, not an on-disk text page, was printed"
+            );
+            drop(check);
+            std::fs::remove_file(printed).unwrap();
+        }
+        fixture.engine.apply_edit(EditRequest {
+            doc: fixture.doc.id,
+            sources: vec![0, 1, 2],
+            rotations: vec![],
+        });
+        fixture.doc = fixture.wait(|event| {
+            if let Event::Edited(info) = event {
+                Some(info)
+            } else {
+                None
+            }
+        });
+        assert_eq!(fixture.doc.pages.len(), 3);
+        fixture.engine.apply_edit(EditRequest {
+            doc: fixture.doc.id,
+            sources: vec![3, 2, 0, 1],
+            rotations: vec![(3, 1)],
+        });
+        fixture.doc = fixture.wait(|event| {
+            if let Event::Edited(info) = event {
+                Some(info)
+            } else {
+                None
+            }
+        });
+        assert_eq!(
+            fixture.doc.pages[0],
+            PageSize {
+                width: 40.0,
+                height: 80.0
+            }
+        );
+        fixture.engine.save(output_path.clone());
+        fixture.wait(|event| {
+            if let Event::Saved { path, .. } = event {
+                Some(path)
+            } else {
+                None
+            }
+        });
+        drop(fixture);
+        let reopened = open_path(output_path.clone());
+        assert_eq!(reopened.doc.pages.len(), 4);
+        assert_eq!(
+            reopened.doc.pages[0],
+            PageSize {
+                width: 40.0,
+                height: 80.0
+            }
+        );
+        reopened.want(Wanted {
+            tiles: vec![TileKey {
+                page: 0,
+                scale: 1.0_f32.to_bits(),
+                col: 0,
+                row: 0,
+            }],
+            ..Wanted::default()
+        });
+        let bitmap = reopened.wait(|event| {
+            if let Event::Tile { bitmap, .. } = event {
+                Some(bitmap)
+            } else {
+                None
+            }
+        });
+        assert!(
+            bitmap
+                .rgba
+                .chunks_exact(4)
+                .any(|p| p[0] > 210 && p[1] < 40 && p[2] < 50)
+        );
+        assert!(bitmap.rgba.chunks_exact(4).any(|p| p[2] > 200 && p[0] < 30));
+        drop(reopened);
+        std::fs::remove_file(output_path).unwrap();
+    }
+
+    #[test]
+    fn whole_pdf_insertion_and_tail_deletion_use_current_page_content() {
+        let mut fixture = open_fixture();
+        let original = fixture.doc.clone();
+        let first_text = page_text(&fixture, &original, 0);
+        let last_text = page_text(&fixture, &original, 2);
+        fixture.engine.import_pages(ImportRequest {
+            edit: EditRequest {
+                doc: fixture.doc.id,
+                sources: vec![2, 0, 1],
+                rotations: vec![],
+            },
+            path: fixture_path(),
+            slot: 1,
+        });
+        fixture.doc = fixture.wait(|event| {
+            if let Event::Imported { info, count, .. } = event {
+                assert_eq!(count, 3);
+                Some(info)
+            } else {
+                None
+            }
+        });
+        assert_eq!(fixture.doc.pages.len(), 6);
+        assert_eq!(page_text(&fixture, &fixture.doc, 0), last_text);
+        assert_eq!(page_text(&fixture, &fixture.doc, 1), first_text);
+        assert_eq!(page_text(&fixture, &fixture.doc, 4), first_text);
+        fixture.engine.apply_edit(EditRequest {
+            doc: fixture.doc.id,
+            sources: vec![0, 1],
+            rotations: vec![],
+        });
+        fixture.doc = fixture.wait(|event| {
+            if let Event::Edited(info) = event {
+                Some(info)
+            } else {
+                None
+            }
+        });
+        assert_eq!(fixture.doc.pages.len(), 2);
+        assert_eq!(page_text(&fixture, &fixture.doc, 0), first_text);
+    }
+
+    #[test]
     fn reports_files_that_are_not_pdfs() {
         let (sender, events) = mpsc::channel();
         let engine = Engine::spawn(move |event| {
@@ -975,7 +1692,7 @@ pub(crate) mod tests {
         engine.open(path, None);
 
         match events.recv_timeout(Duration::from_secs(20)) {
-            Ok(Event::OpenFailed { error, .. }) => assert!(error.contains("not a valid PDF")),
+            Ok(Event::OpenFailed { error, .. }) => assert!(error.contains("不是有效的 PDF")),
             other => panic!("expected a failure, got {other:?}"),
         }
     }

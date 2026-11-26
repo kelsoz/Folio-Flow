@@ -8,6 +8,14 @@ Folio Flow 是一款基于 Rust 的 Windows PDF 阅读与页面编辑工具。�
 
 轻盈的界面，直接的操作，恰到好处的动效。打开文档、沉浸阅读、拖动整理，再以你需要的格式导出——让 PDF 工作流更顺手，也更赏心悦目。
 
+## 演示视频
+
+**无感，精美，迅疾如风。** 看看 Folio Flow 如何让阅读、页面整理与交互反馈连成流畅的工作体验。
+
+[![点击观看 Folio Flow 演示视频：无感，精美，迅疾如风](docs/images/demo-video-cover.png)](https://www.bilibili.com/video/BV13N1Jz6EfG/)
+
+[▶ 在 B 站观看完整演示](https://www.bilibili.com/video/BV13N1Jz6EfG/) · 中文配音
+
 ## 全新界面，为专注而设计
 
 - **亮暗双主题，两种完整设计。** 亮色清透舒展，以细腻的玻璃质感边缘与柔和投影建立层次；暗色采用深空灰，精心平衡背景、面板与高光，让内容始终成为视觉中心。

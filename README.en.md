@@ -8,6 +8,14 @@ Folio Flow is a Rust-powered PDF reader and page editor for Windows. Built on [t
 
 A lightweight interface, direct controls, and carefully tuned motion. Open a document, settle into reading, arrange its pages, and export what you need—all in one considered workspace.
 
+## Watch the demo
+
+**Quiet by design. Beautiful in detail. Swift in motion.** See how Folio Flow brings reading, page organization, and responsive interactions into one fluid workspace.
+
+[![Watch the Folio Flow demo on Bilibili](docs/images/demo-video-cover.png)](https://www.bilibili.com/video/BV13N1Jz6EfG/)
+
+[▶ Watch the full demo on Bilibili](https://www.bilibili.com/video/BV13N1Jz6EfG/) · Chinese narration
+
 ## A new interface, designed for focus
 
 - **Two themes, fully considered.** The light theme combines glass-like edges with soft shadows. The dark theme balances deep space gray surfaces, panels, and highlights, keeping the document at the center of attention.

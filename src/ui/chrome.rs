@@ -15,7 +15,7 @@ use crate::ui::viewer::{Fit, MAX_ZOOM, MIN_ZOOM};
 
 const FULL_WIDTH: f32 = 1280.0;
 const FILE_WIDTH: f32 = 342.0;
-const READ_WIDTH: f32 = 600.0;
+const READ_WIDTH: f32 = 640.0;
 const ACTION_WIDTH: f32 = 300.0;
 const WIDE_ACTION_WIDTH: f32 = 520.0;
 const WINDOW_WIDTH: f32 = 116.0;
@@ -35,7 +35,7 @@ fn compact_read_width(width: f32) -> f32 {
 }
 
 fn read_tools_content_width(app: &App) -> f32 {
-    let mut width = 3.0 * TOOL_SIZE + DIVIDER_WIDTH + 3.0 * TOOL_GAP;
+    let mut width = 4.0 * TOOL_SIZE + DIVIDER_WIDTH + 4.0 * TOOL_GAP;
     width += TOOL_GAP + SLIDER_LABEL_WIDTH + SLIDER_GAP + SLIDER_WIDTH;
 
     if app.view_mode == ViewMode::Reader {
@@ -266,9 +266,17 @@ fn read_tools(app: &App) -> Element<'_, Message> {
             app,
             ToolbarControl::Reader,
             Icon::Document,
-            "阅读",
-            Some(Message::SetView(ViewMode::Reader)),
-            mode == ViewMode::Reader,
+            "单页",
+            Some(Message::SetReadingLayout(false)),
+            mode == ViewMode::Reader && !app.viewer.is_double_page(),
+        ),
+        tool(
+            app,
+            ToolbarControl::DoublePage,
+            Icon::DoublePage,
+            "双页",
+            Some(Message::SetReadingLayout(true)),
+            mode == ViewMode::Reader && app.viewer.is_double_page(),
         ),
         tool(
             app,
@@ -491,7 +499,6 @@ fn tool<'a>(
 ) -> Element<'a, Message> {
     let palette = app.palette;
     let hover = app.toolbar_hover(control);
-    let interactive = message.is_some();
     let color = match (&message, active) {
         (None, _) => palette.faint,
         (_, true) => palette.on_accent,
@@ -504,11 +511,7 @@ fn tool<'a>(
             .on_press_maybe(message)
             .style(move |_, status| theme::ghost_button_motion(palette, status, active, hover))
             .into();
-    let button = if interactive {
-        hover_area(button, control)
-    } else {
-        button
-    };
+    let button = hover_area(button, control);
 
     tooltip(
         button,
@@ -601,7 +604,6 @@ fn operation<'a>(
 
     let palette = app.palette;
     let hover = app.toolbar_hover(control);
-    let interactive = message.is_some();
     let color = if message.is_none() {
         palette.faint
     } else {
@@ -621,11 +623,7 @@ fn operation<'a>(
     .on_press_maybe(message)
     .style(move |_, status| theme::ghost_button_motion(palette, status, false, hover))
     .into();
-    if interactive {
-        hover_area(button, control)
-    } else {
-        button
-    }
+    hover_area(button, control)
 }
 
 fn divider(palette: Palette) -> Element<'static, Message> {

@@ -1,6 +1,6 @@
 [package]
 name = "folio"
-version = "0.3.4"
+version = "0.3.9"
 edition = "2024"
 rust-version = "1.92"
 description = "Folio Flow PDF reader and page editor"

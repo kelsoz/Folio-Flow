@@ -335,7 +335,23 @@ pub fn ghost_button_motion(
     let hover = hover.clamp(0.0, 1.0);
     let mut style = ghost_button(palette, status, active);
 
-    if !active && !matches!(status, button::Status::Disabled) {
+    let hover = if matches!(status, button::Status::Hovered | button::Status::Pressed) {
+        hover.max(0.35)
+    } else {
+        hover
+    };
+    if active {
+        let base = palette.accent;
+        style.background = Some(
+            Color {
+                r: base.r + (palette.text.r - base.r) * hover * 0.12,
+                g: base.g + (palette.text.g - base.g) * hover * 0.12,
+                b: base.b + (palette.text.b - base.b) * hover * 0.12,
+                a: base.a,
+            }
+            .into(),
+        );
+    } else {
         style.background = Some(
             match status {
                 button::Status::Pressed => palette.pressed,
@@ -347,21 +363,18 @@ pub fn ghost_button_motion(
             .into(),
         );
     }
-
-    if !matches!(status, button::Status::Disabled) {
-        style.border.color = Color {
-            a: 0.14 * hover,
-            ..palette.text
-        };
-        style.shadow = Shadow {
-            color: Color {
-                a: palette.shadow.a * 0.24 * hover,
-                ..palette.shadow
-            },
-            offset: Vector::new(0.0, 1.5 * hover),
-            blur_radius: 10.0 * hover,
-        };
-    }
+    style.border.color = Color {
+        a: 0.14 * hover,
+        ..palette.text
+    };
+    style.shadow = Shadow {
+        color: Color {
+            a: palette.shadow.a * 0.24 * hover,
+            ..palette.shadow
+        },
+        offset: Vector::new(0.0, 1.5 * hover),
+        blur_radius: 10.0 * hover,
+    };
 
     style
 }
@@ -462,6 +475,23 @@ pub fn scroller(palette: Palette, status: scrollable::Status) -> scrollable::Sty
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_toolbar_button_states_receive_hover_feedback() {
+        for palette in [Palette::DARK, Palette::LIGHT] {
+            for status in [button::Status::Active, button::Status::Disabled] {
+                for active in [false, true] {
+                    let idle = ghost_button_motion(palette, status, active, 0.0);
+                    let hovered = ghost_button_motion(palette, status, active, 1.0);
+                    assert_ne!(idle.background, hovered.background);
+                    assert!(hovered.border.color.a > idle.border.color.a);
+                    if status == button::Status::Disabled {
+                        assert_eq!(hovered.text_color, palette.faint);
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn dialog_keeps_its_background_while_its_text_is_visible() {

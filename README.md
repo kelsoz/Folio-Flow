@@ -85,6 +85,7 @@ Markdown 导出支持标题、段落、列表、粗斜体、代码与有线表�
 | 阅读视图：适合宽度 / 整页 | Ctrl+1 / Ctrl+2 |
 | 编排视图：返回阅读 / 页面编排 | Ctrl+1 / Ctrl+2 |
 | 切换侧栏 | Ctrl+B |
+| 沉浸模式 / 恢复工具栏 | Tab |
 | 滚动 | 滚轮、方向键、PgUp / PgDn、空格、Home / End |
 
 ## 本地构建
@@ -166,3 +167,16 @@ folio --bench book.pdf
 基于 [Folio](https://github.com/Dethon/folio) 开发，保留原作者署名与 [MIT 许可证](LICENSE)。
 
 感谢 PDFium（BSD-3-Clause / Apache-2.0）、[bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries)、[pdfium-render](https://github.com/ajrcarey/pdfium-render)、Iced（MIT）和 [Lucide](https://lucide.dev) 图标（ISC）。
+
+## 0.3.9 更新
+
+完整更新内容见 [0.3.9 发布说明](docs/releases/0.3.9.md)。
+
+- 单页、双页中点击侧栏页面缩略图，使用固定 420 ms 的平滑滚动定位；跨距不影响时长，连续点击从当前位置转向新目标。滚轮、滚动条、缩放或文字选择可立即接管。整理视图中的缩略图点击仍使用返回阅读及页面匹配过渡。
+- 单页、双页与整理视图之间新增页面匹配过渡：同一页平滑移动、缩放到新位置，快速反向切换从当前画面接续，约 460 ms；直接滚动或拖动滚动条可立即接管。
+- 新增双页阅读按钮，位于单页与整理视图之间；按 1–2、3–4 并排，奇数末页居中。切换时自动适配宽度（适合整页模式会保留）。
+- Tab 切换沉浸模式：隐藏所有浮动工具栏、侧栏和搜索栏，内容铺满窗口；再次按 Tab 恢复，并显示底部操作提示。对话框打开时保留 Tab 焦点操作。
+- 统一工具栏图标的悬停反馈，覆盖已选中与暂不可用状态；中间工具栏随新增按钮自适应。
+- 亮暗主题在切换时保存，下次启动自动恢复；`--light` 可覆盖本次启动。
+- 单页、双页、整理视图及侧边栏（页面缩略图、书签）统一支持滚轮平滑滚动与顶部、底部阻尼回弹；拖动滚动条仍直接定位。
+- 动效参考 [Apple WWDC18 Designing Fluid Interfaces](https://developer.apple.com/videos/play/wwdc2018/803/)，采用临界阻尼（阻尼比 1、角频率 12 rad/s），触边速度限制为 2800 px/s。这些是本项目调校参数，并非苹果滚动控件的公开参数。

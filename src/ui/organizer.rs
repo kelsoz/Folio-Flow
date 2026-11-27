@@ -36,6 +36,7 @@ pub struct State {
     pub size: Size,
     pub drop_bounds: Rectangle,
     pub offset: f32,
+    wheel: Option<crate::motion::WheelScroll>,
     pub track: f32,
     pub selected: HashSet<u32>,
     pub anchor: Option<u32>,
@@ -47,6 +48,7 @@ impl Default for State {
             size: Size::ZERO,
             drop_bounds: Rectangle::default(),
             offset: 0.0,
+            wheel: None,
             track: DEFAULT_TRACK,
             selected: HashSet::new(),
             anchor: None,
@@ -56,6 +58,7 @@ impl Default for State {
 
 impl State {
     pub fn set_document(&mut self, page_count: u32) {
+        self.wheel = None;
         self.offset = 0.0;
         self.selected.clear();
         self.anchor = Some(0);
@@ -139,6 +142,25 @@ impl State {
         }
     }
 
+    pub fn wheel_by(&mut self, delta: f32, page_count: u32) {
+        let maximum = (self.geometry().content_height(page_count) - self.size.height).max(0.0);
+        self.wheel
+            .get_or_insert_with(|| crate::motion::WheelScroll::new(self.offset))
+            .push(delta, maximum);
+    }
+
+    pub fn scrolling(&self) -> bool {
+        self.wheel.is_some()
+    }
+
+    pub fn advance_scroll(&mut self, now: Instant) {
+        if let Some(wheel) = &mut self.wheel
+            && !wheel.advance(&mut self.offset, now)
+        {
+            self.wheel = None;
+        }
+    }
+
     pub fn scroll_by(&mut self, delta: f32, page_count: u32) {
         self.offset += delta;
         self.clamp(page_count);
@@ -150,6 +172,7 @@ impl State {
     }
 
     pub fn clamp(&mut self, page_count: u32) {
+        self.wheel = None;
         let content = self.geometry().content_height(page_count);
         self.offset = self
             .offset
@@ -211,6 +234,17 @@ impl State {
         let cell = geometry.cell_rect(slot);
         let source_slot = slot.saturating_sub(u32::from(preview.is_some_and(|gap| slot > gap)));
         (source_slot + u32::from(point.x > cell.center_x())).min(page_count)
+    }
+
+    pub(crate) fn transition_rect(&self, slot: u32, size: crate::engine::PageSize) -> Rectangle {
+        let maximum = self.geometry().thumbnail_rect(slot);
+        let (width, height) = fit_page(size, maximum.width, maximum.height);
+        Rectangle {
+            x: maximum.center_x() - width / 2.0,
+            y: maximum.center_y() - height / 2.0 - self.offset,
+            width,
+            height,
+        }
     }
 
     fn geometry(&self) -> GridGeometry {
@@ -686,7 +720,9 @@ impl canvas::Program<Message> for Canvas<'_> {
                     mouse::ScrollDelta::Pixels { y, .. } => *y / 56.0,
                 };
 
-                return Some(Action::publish(Message::OrganizerScrolled(-lines * 56.0)));
+                return Some(
+                    Action::publish(Message::OrganizerScrolled(-lines * 56.0)).and_capture(),
+                );
             }
             iced::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
                 state.modifiers = *modifiers;
@@ -950,6 +986,35 @@ mod tests {
 
     use super::*;
     use crate::engine::PageSize;
+
+    #[test]
+    fn organizer_wheel_follows_and_rebounds_and_dragging_cancels_it() {
+        let mut state = State {
+            size: Size::new(800.0, 600.0),
+            ..State::default()
+        };
+        state.wheel_by(120.0, 60);
+        assert_eq!(state.offset, 0.0);
+        let start = Instant::now();
+        state.advance_scroll(start + Duration::from_millis(64));
+        assert!(state.offset > 0.0 && state.offset < 120.0);
+        state.scroll_to(0.0, 60);
+        assert!(!state.scrolling());
+        state.wheel_by(-120.0, 60);
+        state.advance_scroll(Instant::now() + Duration::from_millis(64));
+        assert!(state.offset < -30.0);
+        state.scroll_to(1e6, 60);
+        let bottom = state.offset;
+        state.wheel_by(120.0, 60);
+        let start = Instant::now();
+        state.advance_scroll(start + Duration::from_millis(64));
+        assert!(state.offset > bottom + 30.0);
+        for i in 2..180 {
+            state.advance_scroll(start + Duration::from_millis(i * 64));
+        }
+        assert!(!state.scrolling());
+        assert_eq!(state.offset, bottom);
+    }
 
     #[test]
     fn reference_width_has_six_compact_columns() {

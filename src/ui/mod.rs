@@ -8,6 +8,7 @@ pub mod order;
 pub mod organizer;
 pub mod sidebar;
 pub mod theme;
+pub mod transition;
 pub mod viewer;
 
 use std::time::Duration;
@@ -112,12 +113,16 @@ fn view_at<'a>(app: &'a App, size: Size) -> Element<'a, Message> {
             ),
             ViewMode::Organizer => organizer::view(app),
         };
-        let padding = match app.view_mode {
-            ViewMode::Reader => theme::reader_insets(size.width, app.motion.sidebar.value),
-            ViewMode::Organizer => Padding {
-                top: theme::content_top(size.width),
-                ..Padding::ZERO
-            },
+        let padding = if app.immersive {
+            Padding::ZERO
+        } else {
+            match app.view_mode {
+                ViewMode::Reader => theme::reader_insets(size.width, app.motion.sidebar.value),
+                ViewMode::Organizer => Padding {
+                    top: theme::content_top(size.width),
+                    ..Padding::ZERO
+                },
+            }
         };
 
         layers = layers.push(container(content).width(Fill).height(Fill).padding(padding));
@@ -125,6 +130,10 @@ fn view_at<'a>(app: &'a App, size: Size) -> Element<'a, Message> {
         layers = layers.push(space().width(Fill).height(Fill));
     } else {
         layers = layers.push(welcome(app));
+    }
+
+    if let Some(transition) = &app.view_transition {
+        layers = layers.push(transition::view(app, transition));
     }
 
     let veil = app.motion.view_veil();
@@ -144,7 +153,7 @@ fn view_at<'a>(app: &'a App, size: Size) -> Element<'a, Message> {
     }
 
     let sidebar_progress = app.motion.sidebar.value.clamp(0.0, 1.0);
-    if app.sidebar.open || sidebar_progress > 0.001 {
+    if !app.immersive && (app.sidebar.open || sidebar_progress > 0.001) {
         let width = theme::sidebar_width(size.width);
         let edge = theme::edge(size.width);
         layers = layers.push(
@@ -161,9 +170,11 @@ fn view_at<'a>(app: &'a App, size: Size) -> Element<'a, Message> {
         );
     }
 
-    layers = layers.push(chrome::view(app, size.width));
+    if !app.immersive {
+        layers = layers.push(chrome::view(app, size.width));
+    }
 
-    if app.more_open {
+    if app.more_open && !app.immersive {
         layers =
             layers.push(mouse_area(space().width(Fill).height(Fill)).on_press(Message::Escape));
         layers = layers.push(
@@ -179,7 +190,8 @@ fn view_at<'a>(app: &'a App, size: Size) -> Element<'a, Message> {
     }
 
     let find_progress = app.motion.find.value.clamp(0.0, 1.0);
-    if (app.find.open || find_progress > 0.001) && app.viewer.document().is_some() {
+    if !app.immersive && (app.find.open || find_progress > 0.001) && app.viewer.document().is_some()
+    {
         layers = layers.push(
             container(find_bar(app))
                 .width(Fill)
@@ -526,12 +538,105 @@ mod tests {
                 .count();
             let sidebar_scrolls = messages
                 .iter()
-                .filter(|message| matches!(message, Message::SidebarPagesScrolled(_)))
+                .filter(|message| matches!(message, Message::SidebarWheel(_)))
                 .count();
             let expected = if in_sidebar { (0, 1) } else { (1, 0) };
 
             assert_eq!((reader_scrolls, sidebar_scrolls), expected, "{messages:?}");
         }
+    }
+
+    #[test]
+    fn outline_sidebar_captures_wheel_for_smooth_scrolling() {
+        let (mut app, _) = App::boot(Options::default());
+        app.sidebar.open = true;
+        app.sidebar.show(sidebar::Tab::Outline);
+        let doc = Arc::new(DocInfo {
+            id: 1,
+            path: PathBuf::new(),
+            title: String::new(),
+            pages: vec![
+                PageSize {
+                    width: 612.0,
+                    height: 792.0
+                };
+                20
+            ],
+            outline: (0..100)
+                .map(|i| crate::engine::OutlineItem {
+                    title: format!("Chapter {i}"),
+                    depth: 0,
+                    page: Some(i % 20),
+                })
+                .collect(),
+        });
+        app.sidebar.set_document(&doc);
+        app.viewer.set_document(doc);
+        let mut ui = iced_test::Simulator::with_size(
+            iced::Settings::default(),
+            Size::new(1360.0, 870.0),
+            app.view(),
+        );
+        ui.point_at(Point::new(100.0, 400.0));
+        ui.simulate([iced::Event::Window(window::Event::RedrawRequested(
+            Instant::now(),
+        ))]);
+        ui.simulate([iced::Event::Mouse(mouse::Event::WheelScrolled {
+            delta: mouse::ScrollDelta::Lines { x: 0.0, y: -1.0 },
+        })]);
+        let messages: Vec<_> = ui.into_messages().collect();
+        assert!(
+            messages
+                .iter()
+                .any(|m| matches!(m, Message::SidebarScrolled(_))),
+            "{messages:?}"
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|m| matches!(m, Message::SidebarWheel(56.0)))
+                .count(),
+            1
+        );
+        assert!(
+            !messages
+                .iter()
+                .any(|m| matches!(m, Message::Viewer(Interaction::Scrolled { .. })))
+        );
+    }
+
+    #[test]
+    fn immersive_reader_uses_the_entire_window() {
+        let (mut app, _) = App::boot(Options::default());
+        app.immersive = true;
+        app.sidebar.open = true;
+        app.viewer.set_document(Arc::new(DocInfo {
+            id: 1,
+            path: PathBuf::new(),
+            title: String::new(),
+            pages: vec![
+                PageSize {
+                    width: 612.0,
+                    height: 792.0
+                };
+                3
+            ],
+            outline: Vec::new(),
+        }));
+        let size = Size::new(1360.0, 870.0);
+        let mut simulator =
+            iced_test::Simulator::with_size(iced::Settings::default(), size, app.view());
+        simulator.simulate([iced::Event::Window(window::Event::RedrawRequested(
+            Instant::now(),
+        ))]);
+        let sizes: Vec<_> = simulator
+            .into_messages()
+            .filter_map(|message| match message {
+                Message::Viewer(Interaction::Resized(size)) => Some(size),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sizes, [size]);
     }
 
     /// Start-up renders the first screen before there is a window to lay
@@ -579,3 +684,5 @@ mod tests {
         }
     }
 }
+
+pub mod wheel_gate;

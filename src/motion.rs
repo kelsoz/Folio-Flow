@@ -1,6 +1,56 @@
 //! Motion utilities for the native UI experiments.
 use std::time::{Duration, Instant};
 
+// Shared wheel tuning: a slower follow-through and a stronger, bounded edge impulse.
+pub const SCROLL_OMEGA: f64 = 12.0;
+pub const EDGE_GAIN: f64 = 24.0;
+pub const EDGE_VELOCITY: f64 = 2800.0;
+
+#[derive(Debug)]
+pub struct WheelScroll {
+    pub target: f64,
+    velocity: f64,
+    last: Instant,
+}
+
+impl WheelScroll {
+    pub fn new(position: f32) -> Self {
+        Self {
+            target: position as f64,
+            velocity: 0.0,
+            last: Instant::now(),
+        }
+    }
+    pub fn push(&mut self, delta: f32, maximum: f32) {
+        let requested = self.target + delta as f64;
+        self.target = requested.clamp(0.0, maximum.max(0.0) as f64);
+        if requested != self.target {
+            self.velocity = (self.velocity + (requested - self.target) * EDGE_GAIN)
+                .clamp(-EDGE_VELOCITY, EDGE_VELOCITY);
+        }
+    }
+    pub fn advance(&mut self, position: &mut f32, now: Instant) -> bool {
+        let dt = now
+            .saturating_duration_since(self.last)
+            .as_secs_f64()
+            .min(0.064);
+        self.last = now;
+        let offset = *position as f64 - self.target;
+        let c = self.velocity + SCROLL_OMEGA * offset;
+        let decay = (-SCROLL_OMEGA * dt).exp();
+        let value = self.target + (offset + c * dt) * decay;
+        self.velocity = (self.velocity - SCROLL_OMEGA * c * dt) * decay;
+        *position = value as f32;
+        let epsilon = 0.03_f64.max(8.0 * f32::EPSILON as f64 * self.target.abs());
+        if (value - self.target).abs() < epsilon && self.velocity.abs() < 0.5 {
+            *position = self.target as f32;
+            false
+        } else {
+            true
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Spring {
     pub value: f32,
@@ -255,6 +305,27 @@ pub struct Percentiles {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wheel_has_visible_follow_through_and_bounded_edge_rebound() {
+        let mut wheel = WheelScroll::new(0.0);
+        wheel.push(120.0, 1000.0);
+        let start = wheel.last;
+        let mut position = 0.0;
+        for i in 1..=10 {
+            wheel.advance(&mut position, start + Duration::from_millis(i * 16));
+        }
+        assert!(position > 50.0 && position < 80.0, "{position}");
+        wheel.push(-10000.0, 1000.0);
+        assert_eq!(wheel.velocity, -EDGE_VELOCITY);
+        let mut minimum = position;
+        for i in 11..200 {
+            wheel.advance(&mut position, start + Duration::from_millis(i * 16));
+            minimum = minimum.min(position);
+        }
+        assert!(minimum < -35.0 && minimum > -100.0, "{minimum}");
+        assert_eq!(position, 0.0);
+    }
 
     #[test]
     fn spring_retarget_preserves_velocity() {

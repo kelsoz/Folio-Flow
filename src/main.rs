@@ -6,6 +6,7 @@ mod bench;
 mod engine;
 mod graphics;
 mod motion;
+mod preferences;
 mod trace;
 mod ui;
 mod web;

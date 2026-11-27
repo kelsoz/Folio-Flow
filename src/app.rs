@@ -110,6 +110,7 @@ pub enum ToolbarControl {
     Redo,
     Sidebar,
     Reader,
+    DoublePage,
     Organizer,
     Zoom,
     FitWidth,
@@ -136,6 +137,8 @@ pub enum Message {
     Engine,
     Viewer(Interaction),
     SetView(ViewMode),
+    SetReadingLayout(bool),
+    ToggleImmersive,
     OrganizerFrame {
         size: Size,
         bounds: Rectangle,
@@ -169,9 +172,11 @@ pub enum Message {
         commit: bool,
     },
     SidebarPagesScrolled(f32),
+    SidebarWheel(f32),
+    SidebarStopWheel,
     GridSize(f32),
     DragWindow,
-    WindowShape,
+    WindowSize(Size),
     WindowAction(WindowAction),
     WindowMaximized(bool),
     OpenDialog,
@@ -457,6 +462,8 @@ pub struct App {
     pending: Arc<AtomicBool>,
     pub viewer: Viewer,
     pub view_mode: ViewMode,
+    pub(crate) window_size: Size,
+    pub(crate) view_transition: Option<ui::transition::Transition>,
     pub order: PageOrder,
     pub edits: EditHistory,
     /// Physical source order currently loaded in the viewer.
@@ -466,6 +473,7 @@ pub struct App {
     reader_sidebar_open: bool,
     pub palette: Palette,
     pub motion: Motion,
+    pub immersive: bool,
     pub toolbar_hover_control: Option<ToolbarControl>,
     pub toolbar_hover_amount: Tween,
     pub window_maximized: bool,
@@ -550,18 +558,21 @@ impl App {
             pending,
             viewer: Viewer::default(),
             view_mode: ViewMode::Reader,
+            window_size: options.window_size.unwrap_or(WINDOW),
+            view_transition: None,
             order: PageOrder::default(),
             edits: EditHistory::default(),
             viewer_order: PageOrder::default(),
             organizer: organizer::State::default(),
             sidebar: sidebar::State::default(),
             reader_sidebar_open: true,
-            palette: if options.light {
+            palette: if options.light || crate::preferences::load_light() {
                 Palette::LIGHT
             } else {
                 Palette::DARK
             },
             motion: Motion::default(),
+            immersive: false,
             toolbar_hover_control: None,
             toolbar_hover_amount: Tween::new(0.0),
             window_maximized: false,
@@ -694,6 +705,10 @@ impl App {
         let now = Instant::now();
         if self.dialog_motion.is_active(now)
             || self.motion.is_active(now)
+            || self.viewer.scrolling()
+            || self.sidebar.scrolling()
+            || self.organizer.scrolling()
+            || self.view_transition.is_some()
             || self.toolbar_hover_amount.is_active(now)
             || self.sidebar_animating
             || self.organizer_animating
@@ -718,6 +733,7 @@ impl App {
     }
 
     fn open(&mut self, path: PathBuf) {
+        self.view_transition = None;
         self.external_drop = file_drop::State::default();
         self.dialog = None;
         self.dialog_motion = Tween::new(0.0);
@@ -747,11 +763,13 @@ impl App {
         let scale_factor = self.viewer.scale_factor();
         let (open, height) = (self.sidebar.open, self.sidebar.height);
         let organizer = self.view_mode == ViewMode::Organizer;
+        let double_page = self.viewer.is_double_page();
 
         Box::new(move |doc| {
             let mut viewer = Viewer::default();
             let mut sidebar = sidebar::State::default();
 
+            viewer.set_double_page(double_page);
             viewer.set_scale_factor(scale_factor);
             viewer.set_viewport(viewport);
             sidebar.open = open;
@@ -1066,6 +1084,7 @@ impl App {
         selection: Vec<u32>,
         focus: Option<u32>,
     ) {
+        self.view_transition = None;
         let Some(doc) = self.document().cloned() else {
             self.edits.restore(previous);
             return;
@@ -1114,16 +1133,32 @@ impl App {
     }
 
     fn set_view(&mut self, mode: ViewMode) {
-        if mode == self.view_mode {
+        self.change_view(mode, None);
+    }
+
+    fn change_view(&mut self, mode: ViewMode, double_page: Option<bool>) {
+        if mode == self.view_mode
+            && double_page.is_none_or(|double| double == self.viewer.is_double_page())
+        {
             return;
         }
+        let transition = ui::transition::Transition::capture(self);
+        let focus = (self.view_mode == ViewMode::Organizer && mode == ViewMode::Reader)
+            .then(|| {
+                self.organizer
+                    .focused()
+                    .and_then(|source| self.viewer_order.slot_of(source))
+            })
+            .flatten();
+        self.viewer.stop_scroll();
+        self.organizer.clamp(self.viewer.page_count());
 
-        if mode == ViewMode::Organizer {
+        if mode != self.view_mode && mode == ViewMode::Organizer {
             self.reader_sidebar_open = self.sidebar.open;
             self.sidebar.open = false;
             self.sidebar_animating = false;
             self.motion.set_sidebar(false);
-        } else {
+        } else if mode != self.view_mode {
             self.organizer_animating = false;
             if self.reader_sidebar_open && !self.sidebar.open {
                 self.sidebar.open = true;
@@ -1131,8 +1166,47 @@ impl App {
             }
         }
 
-        self.motion.switch_view();
         self.view_mode = mode;
+        if let Some(double_page) = double_page {
+            self.viewer.set_double_page(double_page);
+        }
+        let size = self.window_size;
+        match mode {
+            ViewMode::Reader => self.viewer.set_viewport(if self.immersive {
+                size
+            } else {
+                ui::page_view_size(size, self.motion.sidebar.value)
+            }),
+            ViewMode::Organizer => self.organizer.set_size(
+                Size::new(
+                    size.width,
+                    (size.height
+                        - if self.immersive {
+                            0.0
+                        } else {
+                            theme::content_top(size.width)
+                        })
+                    .max(0.0),
+                ),
+                self.viewer.page_count(),
+                &self.order,
+            ),
+        }
+        if let Some(page) = focus {
+            self.viewer.go_to_page(page);
+        }
+        if mode == ViewMode::Organizer
+            && let Some(source) = self.organizer.focused()
+        {
+            self.organizer
+                .reveal_source(source, self.viewer.page_count(), &self.order);
+        }
+        if transition.is_some() {
+            self.motion.view = Tween::new(1.0);
+        } else {
+            self.motion.switch_view();
+        }
+        self.view_transition = transition;
     }
 
     /// Tells the engine what the current view is missing. Called after
@@ -1168,7 +1242,16 @@ impl App {
     }
 
     fn sync(&mut self) {
-        let sidebar_pages = sidebar_thumbnails(&self.sidebar, &self.order, &self.viewer_order);
+        let mut sidebar_pages = sidebar_thumbnails(&self.sidebar, &self.order, &self.viewer_order);
+        if let Some(transition) = &self.view_transition {
+            sidebar_pages.extend(
+                transition
+                    .sources()
+                    .filter_map(|source| self.viewer_order.slot_of(source)),
+            );
+            sidebar_pages.sort_unstable();
+            sidebar_pages.dedup();
+        }
         let wanted = match self.view_mode {
             ViewMode::Reader => reader_wanted(&mut self.viewer, &sidebar_pages),
             ViewMode::Organizer => {
@@ -1338,10 +1421,46 @@ impl App {
     }
 
     fn handle(&mut self, message: Message) -> Task<Message> {
+        if matches!(
+            &message,
+            Message::Viewer(
+                Interaction::Scrolled { .. }
+                    | Interaction::Zoomed { .. }
+                    | Interaction::Pressed { .. }
+                    | Interaction::Dragged { .. }
+                    | Interaction::ScrolledTo { .. }
+            ) | Message::OrganizerScrolled(_)
+                | Message::OrganizerScrolledTo(_)
+                | Message::OrganizerClicked { .. }
+                | Message::ZoomTo(_)
+                | Message::Fit(_)
+                | Message::Rotate(_)
+                | Message::DeletePages
+        ) {
+            self.view_transition = None;
+        }
         match message {
             // Every update takes in what the engine has produced.
             Message::Engine => {}
             Message::Animate(now) => {
+                if let Some(transition) = &mut self.view_transition
+                    && !transition.advance(now)
+                {
+                    self.view_transition = None;
+                }
+                if self.organizer.scrolling() {
+                    self.organizer.advance_scroll(now);
+                    self.sync();
+                }
+                if self.sidebar.scrolling() {
+                    self.sidebar.advance_scroll(now);
+                    self.sync();
+                }
+                if self.viewer.scrolling() {
+                    self.viewer.advance_scroll(now);
+                    self.sync();
+                    self.refresh_page_input();
+                }
                 self.motion.advance(now);
                 self.dialog_motion.advance(now);
                 if self.dialog_motion.value <= 0.001 && self.dialog_motion.to == 0.0 {
@@ -1360,6 +1479,7 @@ impl App {
                 {
                     self.sync();
                 }
+                return self.sidebar.outline_scroll_task();
             }
             Message::ToolbarHover { control, hovered } => {
                 if hovered {
@@ -1380,7 +1500,7 @@ impl App {
                     trace::mark("first frame drawn");
                     self.viewer.set_viewport(size);
                 }
-                Interaction::Scrolled { dx, dy } => self.viewer.scroll_by(dx, dy),
+                Interaction::Scrolled { dx, dy } => self.viewer.wheel_by(dx, dy),
                 Interaction::Zoomed { factor, at } => self.viewer.zoom_by(factor, Some(at)),
                 Interaction::Pressed {
                     at,
@@ -1396,6 +1516,26 @@ impl App {
                 }
                 Interaction::ScrolledTo { fraction } => self.viewer.scroll_to_fraction(fraction),
             },
+            Message::ToggleImmersive => {
+                if self.dialog.is_none() {
+                    self.view_transition = None;
+                    self.immersive = !self.immersive;
+                    self.toolbar_hover_control = None;
+                    self.toolbar_hover_amount = Tween::new(0.0);
+                    self.more_open = false;
+                    self.notify(
+                        if self.immersive {
+                            "已进入沉浸模式 · 按 Tab 恢复工具栏"
+                        } else {
+                            "已退出沉浸模式 · 按 Tab 隐藏工具栏"
+                        },
+                        Tone::Info,
+                    );
+                }
+            }
+            Message::SetReadingLayout(double_page) => {
+                self.change_view(ViewMode::Reader, Some(double_page));
+            }
             Message::SetView(mode) => {
                 if mode == ViewMode::Organizer {
                     let source = self.viewer_source(self.viewer.current_page());
@@ -1417,7 +1557,7 @@ impl App {
                     .set_size(size, self.viewer.page_count(), &self.order);
             }
             Message::OrganizerScrolled(delta) => {
-                self.organizer.scroll_by(delta, self.viewer.page_count());
+                self.organizer.wheel_by(delta, self.viewer.page_count());
             }
             Message::OrganizerScrolledTo(offset) => {
                 self.organizer.scroll_to(offset, self.viewer.page_count());
@@ -1470,9 +1610,16 @@ impl App {
                 );
             }
             Message::SidebarPageClicked { source } => {
-                self.set_view(ViewMode::Reader);
-                if let Some(slot) = self.viewer_slot(source) {
-                    self.viewer.go_to_page(slot);
+                if self.view_mode == ViewMode::Reader {
+                    self.view_transition = None;
+                    if let Some(slot) = self.viewer_slot(source) {
+                        self.viewer.animate_to_page(slot);
+                    }
+                } else {
+                    self.set_view(ViewMode::Reader);
+                    if let Some(slot) = self.viewer_slot(source) {
+                        self.viewer.go_to_page(slot);
+                    }
                 }
             }
             Message::SidebarPageDrag {
@@ -1492,6 +1639,11 @@ impl App {
                     self.commit_edit(next);
                 }
             }
+            Message::SidebarStopWheel => self.sidebar.stop_scroll(),
+            Message::SidebarWheel(delta) => {
+                self.sidebar
+                    .wheel_by(delta, &self.order, &self.viewer_order);
+            }
             Message::SidebarPagesScrolled(delta) => {
                 self.sidebar
                     .scroll_by(delta, &self.order, &self.viewer_order);
@@ -1508,7 +1660,13 @@ impl App {
             Message::DragWindow => {
                 return window::oldest().and_then(window::drag::<Message>).discard();
             }
-            Message::WindowShape => return shape_window_task(window_border_color(self.palette)),
+            Message::WindowSize(size) => {
+                if size != self.window_size {
+                    self.view_transition = None;
+                }
+                self.window_size = size;
+                return shape_window_task(window_border_color(self.palette));
+            }
             Message::WindowMaximized(maximized) => self.window_maximized = maximized,
             Message::WindowAction(action) => {
                 return match action {
@@ -1569,7 +1727,9 @@ impl App {
                 self.viewer.go_to_page(page);
             }
             Message::SidebarScrolled(viewport) => {
-                self.sidebar.offset = viewport.absolute_offset().y;
+                if !self.sidebar.scrolling() {
+                    self.sidebar.offset = viewport.absolute_offset().y;
+                }
                 self.sidebar.height = viewport.bounds().height;
             }
             Message::PageInput(value) => {
@@ -2007,6 +2167,9 @@ impl App {
                 } else {
                     Palette::DARK
                 };
+                if let Err(error) = crate::preferences::save_light(!self.palette.is_dark) {
+                    self.notify(format!("无法保存主题设置：{error}"), Tone::Error);
+                }
                 return shape_window_task(window_border_color(self.palette));
             }
             Message::Find => {
@@ -2882,6 +3045,12 @@ fn escape(
             key: Key::Named(Named::Escape),
             ..
         }) => Some(Message::Escape),
+        iced::Event::Keyboard(keyboard::Event::KeyPressed {
+            key: Key::Named(Named::Tab),
+            modifiers,
+            repeat: false,
+            ..
+        }) if modifiers.is_empty() => Some(Message::ToggleImmersive),
         _ => None,
     }
 }
@@ -2901,8 +3070,8 @@ fn window_event(
         iced::Event::Window(window::Event::FileDropped(path)) => Some(Message::FileDropped(path)),
         iced::Event::Window(window::Event::FileHovered(path)) => Some(Message::FileHovered(path)),
         iced::Event::Window(window::Event::FilesHoveredLeft) => Some(Message::FileHoverLeft),
-        iced::Event::Window(window::Event::Opened { .. } | window::Event::Resized(_)) => {
-            Some(Message::WindowShape)
+        iced::Event::Window(window::Event::Opened { size, .. } | window::Event::Resized(size)) => {
+            Some(Message::WindowSize(size))
         }
         iced::Event::Window(window::Event::Rescaled(scale_factor)) => {
             Some(Message::ScaleFactor(scale_factor))
@@ -3258,6 +3427,205 @@ mod tests {
             panic!("expected rgba pixels");
         };
         assert_eq!(pixels[0], source as u8 * 40);
+    }
+
+    #[test]
+    fn thumbnail_click_scrolls_in_reading_but_keeps_magic_move_from_organizer() {
+        for double in [false, true] {
+            let (mut app, _) = App::boot(Options {
+                sidebar: Some("hidden".into()),
+                ..Options::default()
+            });
+            app.viewer.set_document(Arc::new(engine::DocInfo {
+                id: 1,
+                path: PathBuf::new(),
+                title: String::new(),
+                pages: vec![
+                    engine::PageSize {
+                        width: 612.0,
+                        height: 792.0
+                    };
+                    20
+                ],
+                outline: Vec::new(),
+            }));
+            app.order.reset(20);
+            app.viewer_order.reset(20);
+            app.organizer.set_document(20);
+            let _ = app.update(Message::SetReadingLayout(double));
+            app.viewer.go_to_page(0);
+            let _ = app.update(Message::SidebarPageClicked { source: 12 });
+            assert_eq!(app.view_mode, ViewMode::Reader);
+            assert_eq!(app.viewer.is_double_page(), double);
+            assert_eq!(
+                app.viewer.current_page(),
+                0,
+                "the initial frame stays in place"
+            );
+            assert!(app.viewer.scrolling());
+            assert!(app.view_transition.is_none());
+            let _ = app.update(Message::Animate(
+                Instant::now() + Duration::from_millis(500),
+            ));
+            assert_eq!(app.viewer.current_page(), 12);
+            assert!(!app.viewer.scrolling());
+            let _ = app.update(Message::SetView(ViewMode::Organizer));
+            let _ = app.update(Message::ToggleSidebar);
+            let _ = app.update(Message::SidebarPageClicked { source: 3 });
+            assert_eq!(app.view_mode, ViewMode::Reader);
+            assert_eq!(app.viewer.is_double_page(), double);
+            assert_eq!(app.viewer.current_page(), 3);
+            assert!(!app.viewer.scrolling());
+            assert!(app.view_transition.is_some());
+        }
+    }
+
+    #[test]
+    fn immersive_toggle_restores_sidebar_and_toasts_in_both_views() {
+        let (mut app, _) = App::boot(Options::default());
+        for mode in [ViewMode::Reader, ViewMode::Organizer] {
+            app.set_view(mode);
+            let sidebar = app.sidebar.open;
+            let _ = app.update(Message::ToggleImmersive);
+            assert!(app.immersive);
+            assert!(app.toast.as_ref().unwrap().text.contains("已进入沉浸模式"));
+            assert_eq!(app.sidebar.open, sidebar);
+            let _ = app.update(Message::ToggleImmersive);
+            assert!(!app.immersive);
+            assert!(app.toast.as_ref().unwrap().text.contains("已退出沉浸模式"));
+            assert_eq!(app.sidebar.open, sidebar);
+            assert_eq!(app.view_mode, mode);
+        }
+        let _ = app.update(Message::SetReadingLayout(true));
+        assert_eq!(app.view_mode, ViewMode::Reader);
+        assert!(app.viewer.is_double_page());
+        let _ = app.update(Message::SetReadingLayout(false));
+        assert!(!app.viewer.is_double_page());
+    }
+
+    #[test]
+    fn v038_transition_snapshots_when_requested() {
+        if std::env::var_os("FOLIO_V038_SNAPSHOTS").is_none() {
+            return;
+        }
+        let (mut app, _) = App::boot(Options {
+            file: Some(fixture_path()),
+            sidebar: Some("hidden".into()),
+            window_size: Some(Size::new(1360.0, 870.0)),
+            ..Options::default()
+        });
+        settle(&mut app, |app| app.document().is_some());
+        app.change_view(ViewMode::Organizer, None);
+        app.view_transition = None;
+        app.sync();
+        settle_thumbnails(&mut app);
+        app.palette = Palette::DARK;
+        let directory = format!("target/v038-reviewed/{}", std::process::id());
+        std::fs::create_dir_all(&directory).unwrap();
+        for (from, to) in [(0, 1), (1, 0), (0, 2), (2, 0), (1, 2), (2, 1)] {
+            let mode = |value| {
+                if value == 2 {
+                    ViewMode::Organizer
+                } else {
+                    ViewMode::Reader
+                }
+            };
+            app.change_view(mode(from), (from != 2).then_some(from == 1));
+            app.view_transition = None;
+            app.motion.view = Tween::new(1.0);
+            app.viewer.go_to_start();
+            app.sync();
+            settle(&mut app, |app| {
+                app.view_mode == ViewMode::Organizer || app.viewer.is_complete()
+            });
+            app.change_view(mode(to), (to != 2).then_some(to == 1));
+            app.sync();
+            settle(&mut app, |app| {
+                app.view_mode == ViewMode::Organizer || app.viewer.is_complete()
+            });
+            let start = app.view_transition.as_ref().unwrap().progress.started;
+            for elapsed in [0, 115, 230, 345, 500] {
+                if elapsed != 0 {
+                    let _ = app.handle(Message::Animate(start + Duration::from_millis(elapsed)));
+                }
+                let mut simulator = iced_test::Simulator::with_size(
+                    iced::Settings {
+                        default_font: ui::font(),
+                        ..iced::Settings::default()
+                    },
+                    app.window_size,
+                    ui::view(&app),
+                );
+                simulator
+                    .snapshot(&app.theme())
+                    .unwrap()
+                    .matches_image(format!("{directory}/{from}-{to}-{elapsed}.png"))
+                    .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn v037_visual_snapshots_when_requested() {
+        if std::env::var_os("FOLIO_V037_SNAPSHOTS").is_none() {
+            return;
+        }
+        let (mut app, _) = App::boot(Options {
+            file: Some(fixture_path()),
+            sidebar: Some("hidden".into()),
+            ..Options::default()
+        });
+        settle(&mut app, |app| app.document().is_some());
+        app.palette = Palette::DARK;
+        let directory = format!("target/v037-reviewed/{}", std::process::id());
+        std::fs::create_dir_all(&directory).unwrap();
+        for (name, mode, double, immersive) in [
+            ("single", ViewMode::Reader, false, false),
+            ("double", ViewMode::Reader, true, false),
+            ("immersive", ViewMode::Reader, true, true),
+            ("organizer", ViewMode::Organizer, true, false),
+        ] {
+            app.set_view(mode);
+            app.viewer.set_double_page(double);
+            app.immersive = false;
+            app.toast = None;
+            if immersive {
+                let _ = app.update(Message::ToggleImmersive);
+            }
+            app.motion.view = Tween::new(1.0);
+            app.view_transition = None;
+            app.viewer.set_viewport(if immersive {
+                Size::new(1360.0, 870.0)
+            } else {
+                ui::page_view_size(Size::new(1360.0, 870.0), 0.0)
+            });
+            app.organizer.set_size(
+                Size::new(1360.0, 768.0),
+                app.viewer.page_count(),
+                &app.order,
+            );
+            app.sync();
+            settle(&mut app, |app| {
+                if mode == ViewMode::Reader {
+                    app.viewer.is_complete()
+                } else {
+                    (0..app.viewer.page_count()).all(|page| app.viewer.thumbnail(page).is_some())
+                }
+            });
+            let mut simulator = iced_test::Simulator::with_size(
+                iced::Settings {
+                    default_font: ui::font(),
+                    ..iced::Settings::default()
+                },
+                Size::new(1360.0, 870.0),
+                ui::view(&app),
+            );
+            simulator
+                .snapshot(&app.theme())
+                .unwrap()
+                .matches_image(format!("{directory}/{name}.png"))
+                .unwrap();
+        }
     }
 
     #[test]

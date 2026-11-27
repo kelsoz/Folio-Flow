@@ -1,7 +1,9 @@
 # Builds and verifies the portable Windows package. Run with PowerShell 7.
+param([string]$OutputDirectory = 'dist\Folio Flow')
+
 $ErrorActionPreference = 'Stop'
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$outputDir = Join-Path $projectRoot 'dist\Folio Flow'
+$outputDir = [IO.Path]::GetFullPath($OutputDirectory, $projectRoot)
 $checksDir = Join-Path $projectRoot 'target\checks'
 
 Push-Location $projectRoot

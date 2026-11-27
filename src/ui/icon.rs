@@ -51,6 +51,7 @@ icons! {
     FitWidth => "move-horizontal",
     FitPage => "move-vertical",
     Document => "file-text",
+    DoublePage => "book-open",
     Close => "x",
     Search => "search",
     ChevronUp => "chevron-up",

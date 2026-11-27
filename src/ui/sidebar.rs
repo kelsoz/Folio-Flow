@@ -115,6 +115,7 @@ pub struct State {
     pub drop_bounds: Rectangle,
     pub tab: Tab,
     pub offset: f32,
+    wheel: Option<crate::motion::WheelScroll>,
     pub height: f32,
     pages_size: Size,
     page_sizes: Vec<PageSize>,
@@ -132,6 +133,7 @@ impl Default for State {
             drop_bounds: Rectangle::default(),
             tab: Tab::Pages,
             offset: 0.0,
+            wheel: None,
             height: 1200.0,
             pages_size: Size::ZERO,
             page_sizes: Vec::new(),
@@ -158,6 +160,7 @@ fn has_children(doc: &DocInfo, index: usize) -> bool {
 
 impl State {
     pub fn set_document(&mut self, doc: &DocInfo) {
+        self.wheel = None;
         self.update_document(doc);
         self.offset = 0.0;
     }
@@ -233,6 +236,7 @@ impl State {
 
     pub fn show(&mut self, tab: Tab) {
         if self.tab != tab {
+            self.wheel = None;
             self.tab = tab;
             self.offset = 0.0;
         }
@@ -336,12 +340,59 @@ impl State {
         }
     }
 
+    pub fn stop_scroll(&mut self) {
+        self.wheel = None;
+    }
+
+    pub fn scrolling(&self) -> bool {
+        self.wheel.is_some()
+    }
+
+    pub fn wheel_by(&mut self, delta: f32, order: &PageOrder, document_order: &PageOrder) {
+        let maximum = if self.tab == Tab::Pages {
+            let layout = PageLayout::new(
+                &self.page_sizes,
+                self.pages_size.width,
+                order,
+                document_order,
+            );
+            (layout.height - self.pages_size.height).max(0.0)
+        } else {
+            (self.rows.len() as f32 * OUTLINE_ROW + 8.0 - self.height).max(0.0)
+        };
+        self.wheel
+            .get_or_insert_with(|| crate::motion::WheelScroll::new(self.offset))
+            .push(delta, maximum);
+    }
+
+    pub fn outline_scroll_task(&self) -> Task<Message> {
+        if self.tab != Tab::Outline {
+            return Task::none();
+        }
+        iced::widget::operation::scroll_to(
+            Tab::Outline.scroll_id(),
+            scrollable::AbsoluteOffset {
+                x: 0.0,
+                y: self.offset.max(0.0),
+            },
+        )
+    }
+
+    pub fn advance_scroll(&mut self, now: Instant) {
+        if let Some(wheel) = &mut self.wheel
+            && !wheel.advance(&mut self.offset, now)
+        {
+            self.wheel = None;
+        }
+    }
+
     pub fn scroll_by(&mut self, delta: f32, order: &PageOrder, document_order: &PageOrder) {
         self.offset += delta;
         self.clamp_pages(order, document_order);
     }
 
     pub fn clamp_pages(&mut self, order: &PageOrder, document_order: &PageOrder) {
+        self.wheel = None;
         let layout = PageLayout::new(
             &self.page_sizes,
             self.pages_size.width,
@@ -480,7 +531,7 @@ fn list<'a>(
 
     rows = rows.push(space().height((count - visible.end) as f32 * OUTLINE_ROW));
 
-    scrollable(container(rows).padding(iced::Padding {
+    let content = scrollable(container(rows).padding(iced::Padding {
         top: 0.0,
         right: 12.0,
         bottom: 8.0,
@@ -497,7 +548,9 @@ fn list<'a>(
     .width(Fill)
     .height(Fill)
     .style(move |_, status| theme::scroller(palette, status))
-    .into()
+    .into();
+    let maximum = (count as f32 * OUTLINE_ROW + 8.0 - state.height).max(0.0);
+    super::wheel_gate::wrap(content, state.offset.clamp(0.0, maximum) - state.offset)
 }
 
 fn outline_row<'a>(
@@ -843,8 +896,7 @@ impl canvas::Program<Message> for Canvas<'_> {
                 cursor.position_over(bounds)?;
 
                 return Some(
-                    Action::publish(Message::SidebarPagesScrolled(wheel_scroll(delta)))
-                        .and_capture(),
+                    Action::publish(Message::SidebarWheel(wheel_scroll(delta))).and_capture(),
                 );
             }
             _ => {}
@@ -1183,6 +1235,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sidebar_wheel_animates_and_direct_scroll_cancels_it() {
+        let mut order = PageOrder::default();
+        order.reset(20);
+        let mut state = State {
+            pages_size: Size::new(220.0, 400.0),
+            page_sizes: vec![
+                PageSize {
+                    width: 612.0,
+                    height: 792.0
+                };
+                20
+            ],
+            ..State::default()
+        };
+        state.wheel_by(120.0, &order, &order);
+        assert_eq!(state.offset, 0.0);
+        state.advance_scroll(Instant::now() + Duration::from_millis(64));
+        assert!(state.offset > 0.0 && state.offset < 120.0);
+        state.scroll_by(40.0, &order, &order);
+        assert!(!state.scrolling());
+    }
+
+    #[test]
     fn page_rows_follow_each_page_aspect_ratio() {
         let pages = [
             PageSize {
@@ -1489,10 +1564,7 @@ mod tests {
             .expect("wheel inside the page list is handled");
         let (message, _, _) = action.into_inner();
 
-        assert!(matches!(
-            message,
-            Some(Message::SidebarPagesScrolled(-56.0))
-        ));
+        assert!(matches!(message, Some(Message::SidebarWheel(-56.0))));
     }
 
     #[test]

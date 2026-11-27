@@ -166,3 +166,16 @@ folio --bench book.pdf
 Based on [Folio](https://github.com/Dethon/folio), retaining the original attribution and [MIT license](LICENSE).
 
 Thanks to PDFium (BSD-3-Clause / Apache-2.0), [bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries), [pdfium-render](https://github.com/ajrcarey/pdfium-render), Iced (MIT), and [Lucide](https://lucide.dev) icons (ISC).
+
+## 0.3.9 update
+
+See the [0.3.9 release notes](docs/releases/0.3.9.md) for the complete update.
+
+- Clicking a sidebar page thumbnail in single-page or two-page reading scrolls to it over a fixed 420 ms, regardless of distance. A new click retargets from the displayed position; wheel, scrollbar, zoom, and text selection take over immediately. Organizer thumbnail clicks retain the existing return-to-reading matched-page transition.
+- Matched-page transitions between single-page, two-page, and organizer views: pages move and resize over approximately 460 ms. Interrupted switches continue from the displayed geometry; direct scrolling takes over immediately.
+- New two-page reading button between single-page and organizer: pair pages 1–2, 3–4, with an odd final page centered. Switching layouts fits the width unless fit-page is selected.
+- Tab toggles immersive mode, hiding toolbars, sidebar, and search UI while filling the window with content. Press Tab again to restore; a bottom toast explains each transition. Dialogs keep normal Tab navigation.
+- Consistent icon hover feedback, including selected and disabled controls; the center toolbar adapts to the extra button.
+- Remember the selected light/dark theme across launches; `--light` overrides startup.
+- Unified smooth wheel scrolling and damped boundary rebound in single-page, two-page, organizer, and both sidebar tabs. Scrollbar dragging and page navigation remain direct.
+- Inspired by [Apple WWDC18 Designing Fluid Interfaces](https://developer.apple.com/videos/play/wwdc2018/803/). Project tuning: critical damping, angular frequency 12 rad/s, boundary velocity capped at 2800 px/s; these are not Apple scroll-view constants.

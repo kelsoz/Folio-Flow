@@ -94,6 +94,7 @@ struct Tile {
     bytes: usize,
 }
 
+#[derive(Clone)]
 pub(crate) struct PageSnapshot {
     pub rect: Rectangle,
     pub size: PageSize,
@@ -101,16 +102,35 @@ pub(crate) struct PageSnapshot {
     pub tiles: Vec<(Rectangle, image::Handle)>,
 }
 
+// Critically damped response (Apple WWDC18 session 803); values tuned for wheel input.
+struct WheelMotion {
+    target: (f64, f64),
+    velocity: (f64, f64),
+    last: std::time::Instant,
+}
+
+/// Page navigation has a fixed wall-clock duration, independent of document distance.
+struct PageScroll {
+    from: (f64, f64),
+    to: (f64, f64),
+    page: u32,
+    progress: crate::motion::Tween,
+}
+
 pub struct Viewer {
     doc: Option<Arc<DocInfo>>,
     /// `offsets[i]` is the summed height in points of the pages before `i`.
     offsets: Vec<f64>,
     widest: f32,
+    double_page: bool,
+    reading_page: Option<u32>,
     zoom: f32,
     fit: Fit,
     /// Content position at the viewport's top-left, in logical pixels.
     scroll_x: f64,
     scroll_y: f64,
+    wheel: Option<WheelMotion>,
+    page_scroll: Option<PageScroll>,
     viewport: Size,
     scale_factor: f32,
     tiles: LruCache<TileKey, Tile>,
@@ -146,10 +166,14 @@ impl Default for Viewer {
             doc: None,
             offsets: vec![0.0],
             widest: 1.0,
+            double_page: false,
+            reading_page: None,
             zoom: 1.0,
             fit: Fit::Width,
             scroll_x: 0.0,
             scroll_y: 0.0,
+            wheel: None,
+            page_scroll: None,
             viewport: Size::ZERO,
             scale_factor: 1.0,
             tiles: LruCache::unbounded(),
@@ -176,18 +200,11 @@ impl Viewer {
     }
 
     pub fn set_document(&mut self, doc: Arc<DocInfo>) {
-        let mut offsets = Vec::with_capacity(doc.pages.len() + 1);
-        let mut total = 0.0f64;
-
-        offsets.push(0.0);
-        for page in &doc.pages {
-            total += page.height as f64;
-            offsets.push(total);
-        }
-
-        self.widest = doc.pages.iter().map(|page| page.width).fold(1.0, f32::max);
-        self.offsets = offsets;
+        self.page_scroll = None;
+        self.wheel = None;
         self.doc = Some(doc);
+        self.rebuild_layout();
+        self.reading_page = None;
         self.tiles.clear();
         self.tile_bytes = 0;
         self.received = 0;
@@ -233,6 +250,74 @@ impl Viewer {
         for (slot, thumbnail) in thumbnails {
             self.thumbnails.put(slot, thumbnail);
         }
+    }
+
+    pub fn is_double_page(&self) -> bool {
+        self.double_page
+    }
+
+    pub fn set_double_page(&mut self, double_page: bool) {
+        if self.double_page == double_page {
+            return;
+        }
+        let page = self.current_page();
+        self.remember_stale_scale();
+        self.double_page = double_page;
+        if self.fit == Fit::Manual {
+            self.fit = Fit::Width;
+        }
+        self.rebuild_layout();
+        self.refit();
+        self.go_to_page(page);
+    }
+
+    fn columns(&self) -> u32 {
+        if self.double_page { 2 } else { 1 }
+    }
+
+    fn rebuild_layout(&mut self) {
+        self.offsets.clear();
+        self.widest = 1.0;
+        let mut total = 0.0;
+        if let Some(doc) = &self.doc {
+            for row in doc.pages.chunks(self.columns() as usize) {
+                self.offsets.extend(std::iter::repeat_n(total, row.len()));
+                total += row
+                    .iter()
+                    .map(|page| page.height as f64)
+                    .fold(0.0, f64::max);
+                self.widest = self.widest.max(row.iter().map(|page| page.width).sum());
+            }
+        }
+        self.offsets.push(total);
+    }
+
+    fn row_height(&self, page: u32) -> f64 {
+        let first = page / self.columns() * self.columns();
+        (first..(first + self.columns()).min(self.page_count()))
+            .map(|page| self.size(page).height as f64)
+            .fold(0.0, f64::max)
+    }
+
+    fn page_left(&self, page: u32) -> f64 {
+        if !self.double_page {
+            return (self.content_width() - self.size(page).width as f64 * self.ppp()) / 2.0;
+        }
+        let first = page / 2 * 2;
+        let has_right = first + 1 < self.page_count();
+        let left_width = self.size(first).width as f64 * self.ppp();
+        let width = left_width
+            + if has_right {
+                GAP as f64 + self.size(first + 1).width as f64 * self.ppp()
+            } else {
+                0.0
+            };
+        (self.content_width() - width) / 2.0
+            + if page == first {
+                0.0
+            } else {
+                left_width + GAP as f64
+            }
     }
 
     pub fn update_document_info(&mut self, doc: Arc<DocInfo>) {
@@ -299,7 +384,9 @@ impl Viewer {
     }
 
     fn page_top(&self, page: u32) -> f64 {
-        MARGIN as f64 + self.offsets[page as usize] * self.ppp() + page as f64 * GAP as f64
+        MARGIN as f64
+            + self.offsets[page as usize] * self.ppp()
+            + (page / self.columns()) as f64 * GAP as f64
     }
 
     fn content_height(&self) -> f64 {
@@ -309,11 +396,18 @@ impl Viewer {
             return 0.0;
         }
 
-        self.page_top(pages - 1) + self.size(pages - 1).height as f64 * self.ppp() + MARGIN as f64
+        self.page_top(pages - 1) + self.row_height(pages - 1) * self.ppp() + MARGIN as f64
     }
 
     fn content_width(&self) -> f64 {
-        (self.widest as f64 * self.ppp() + 2.0 * MARGIN as f64).max(self.viewport.width as f64)
+        (self.widest as f64 * self.ppp()
+            + if self.double_page && self.page_count() > 1 {
+                GAP as f64
+            } else {
+                0.0
+            }
+            + 2.0 * MARGIN as f64)
+            .max(self.viewport.width as f64)
     }
 
     fn max_scroll(&self) -> (f64, f64) {
@@ -324,6 +418,8 @@ impl Viewer {
     }
 
     fn clamp(&mut self) {
+        self.page_scroll = None;
+        self.wheel = None;
         let (max_x, max_y) = self.max_scroll();
 
         self.scroll_x = self.scroll_x.clamp(0.0, max_x);
@@ -338,11 +434,13 @@ impl Viewer {
             return 0;
         }
 
-        let (mut low, mut high) = (0u32, pages - 1);
+        let columns = self.columns();
+        let (mut low, mut high) = (0u32, pages.div_ceil(columns) - 1);
 
         while low < high {
             let middle = (low + high) / 2;
-            let bottom = self.page_top(middle) + self.size(middle).height as f64 * self.ppp();
+            let page = middle * columns;
+            let bottom = self.page_top(page) + self.row_height(page) * self.ppp();
 
             if bottom < y {
                 low = middle + 1;
@@ -351,7 +449,7 @@ impl Viewer {
             }
         }
 
-        low
+        low * columns
     }
 
     fn pages_between(&self, top: f64, bottom: f64) -> Range<u32> {
@@ -365,7 +463,7 @@ impl Viewer {
         let mut last = self.page_at(bottom);
 
         if self.page_top(last) <= bottom {
-            last += 1;
+            last += self.columns();
         }
 
         first..last.clamp(first, pages)
@@ -378,7 +476,10 @@ impl Viewer {
     /// The page the reader is on: the one under a line a third of the way
     /// down the viewport.
     pub fn current_page(&self) -> u32 {
-        self.page_at(self.scroll_y + self.viewport.height as f64 * 0.35)
+        let first = self.page_at(self.scroll_y + self.viewport.height as f64 * 0.35);
+        self.reading_page
+            .filter(|page| self.double_page && *page / 2 == first / 2)
+            .unwrap_or(first)
     }
 
     /// Geometry of a page in device pixels relative to the viewport origin.
@@ -387,7 +488,7 @@ impl Viewer {
         let size = self.size(page);
         let scale = self.scale_factor as f64;
         let (width, height) = page_pixels(size, self.device_scale());
-        let x = (self.content_width() - size.width as f64 * self.ppp()) / 2.0 - self.scroll_x;
+        let x = self.page_left(page) - self.scroll_x;
         let y = self.page_top(page) - self.scroll_y;
 
         (
@@ -399,7 +500,7 @@ impl Viewer {
     }
 
     /// Geometry of a page in logical pixels relative to the viewport origin.
-    fn page_rect(&self, page: u32) -> Rectangle {
+    pub(crate) fn page_rect(&self, page: u32) -> Rectangle {
         let (x, y, width, height) = self.device_rect(page);
         let scale = self.scale_factor;
 
@@ -423,6 +524,98 @@ impl Viewer {
         self.clamp();
     }
 
+    pub fn wheel_by(&mut self, dx: f32, dy: f32) {
+        self.page_scroll = None;
+        if self.doc.is_none() {
+            return;
+        }
+        let maximum = self.max_scroll();
+        let motion = self.wheel.get_or_insert(WheelMotion {
+            target: (self.scroll_x, self.scroll_y),
+            velocity: (0.0, 0.0),
+            last: std::time::Instant::now(),
+        });
+        for (target, velocity, delta, max) in [
+            (
+                &mut motion.target.0,
+                &mut motion.velocity.0,
+                dx as f64,
+                maximum.0,
+            ),
+            (
+                &mut motion.target.1,
+                &mut motion.velocity.1,
+                dy as f64,
+                maximum.1,
+            ),
+        ] {
+            let requested = *target + delta;
+            *target = requested.clamp(0.0, max);
+            // Resist repeated boundary input instead of accumulating unlimited travel.
+            if requested != *target {
+                *velocity = (*velocity + (requested - *target) * crate::motion::EDGE_GAIN)
+                    .clamp(-crate::motion::EDGE_VELOCITY, crate::motion::EDGE_VELOCITY);
+            }
+        }
+        if dy != 0.0 {
+            self.heading = dy.signum() as f64;
+        }
+    }
+
+    pub fn stop_scroll(&mut self) {
+        self.clamp();
+    }
+
+    pub fn scrolling(&self) -> bool {
+        self.wheel.is_some() || self.page_scroll.is_some()
+    }
+
+    pub fn advance_scroll(&mut self, now: std::time::Instant) {
+        if let Some(navigation) = &mut self.page_scroll {
+            let active = navigation.progress.advance(now);
+            let t = navigation.progress.value as f64;
+            self.scroll_x = navigation.from.0 + (navigation.to.0 - navigation.from.0) * t;
+            self.scroll_y = navigation.from.1 + (navigation.to.1 - navigation.from.1) * t;
+            if !active {
+                self.scroll_x = navigation.to.0;
+                self.scroll_y = navigation.to.1;
+                self.reading_page = Some(navigation.page);
+                self.page_scroll = None;
+            }
+            return;
+        }
+        let Some(motion) = &mut self.wheel else {
+            return;
+        };
+        let dt = now
+            .saturating_duration_since(motion.last)
+            .as_secs_f64()
+            .min(0.064);
+        motion.last = now;
+        let mut active = false;
+        for (position, target, velocity) in [
+            (&mut self.scroll_x, motion.target.0, &mut motion.velocity.0),
+            (&mut self.scroll_y, motion.target.1, &mut motion.velocity.1),
+        ] {
+            // Exact critical spring solution, shared tuning with the sidebar.
+            let omega = crate::motion::SCROLL_OMEGA;
+            let offset = *position - target;
+            let c = *velocity + omega * offset;
+            let decay = (-omega * dt).exp();
+            *position = target + (offset + c * dt) * decay;
+            *velocity = (*velocity - omega * c * dt) * decay;
+            if (*position - target).abs() < 0.02 && velocity.abs() < 0.5 {
+                *position = target;
+                *velocity = 0.0;
+            } else {
+                active = true;
+            }
+        }
+        if !active {
+            self.wheel = None;
+        }
+    }
+
     /// Scrolls by a fraction of the viewport height.
     pub fn scroll_by_viewport(&mut self, fraction: f32) {
         self.scroll_by(0.0, (self.viewport.height - 40.0).max(40.0) * fraction);
@@ -437,6 +630,40 @@ impl Viewer {
         self.go_to(page, None);
     }
 
+    pub fn animate_to_page(&mut self, page: u32) {
+        if self.page_count() == 0 {
+            return;
+        }
+        let page = page.min(self.page_count() - 1);
+        if self
+            .page_scroll
+            .as_ref()
+            .is_some_and(|navigation| navigation.page == page)
+        {
+            return;
+        }
+        let from = (self.scroll_x, self.scroll_y);
+        // Reuse direct navigation's clamping and double-page positioning.
+        self.go_to_page(page);
+        let to = (self.scroll_x, self.scroll_y);
+        if from == to {
+            return;
+        }
+        self.scroll_x = from.0;
+        self.scroll_y = from.1;
+        if from.1 != to.1 {
+            self.heading = (to.1 - from.1).signum();
+        }
+        let mut progress = crate::motion::Tween::new(0.0);
+        progress.start(1.0, std::time::Duration::from_millis(420));
+        self.page_scroll = Some(PageScroll {
+            from,
+            to,
+            page,
+            progress,
+        });
+    }
+
     /// Brings a place on a page, `top` points down it, to the top of the
     /// view; the top of the page itself, without one.
     pub fn go_to(&mut self, page: u32, top: Option<f32>) {
@@ -445,6 +672,11 @@ impl Viewer {
         }
 
         let page = page.min(self.page_count() - 1);
+        self.reading_page = Some(page);
+        if self.double_page {
+            let centre = self.page_left(page) + self.size(page).width as f64 * self.ppp() / 2.0;
+            self.scroll_x = centre - self.viewport.width as f64 / 2.0;
+        }
         let down = top.map_or(0.0, |top| top.clamp(0.0, self.size(page).height) as f64);
 
         // Leave the gap above the page in view, so it reads as a page top.
@@ -453,10 +685,16 @@ impl Viewer {
     }
 
     pub fn go_to_start(&mut self) {
+        self.page_scroll = None;
+        self.reading_page = None;
+        self.wheel = None;
         self.scroll_y = 0.0;
     }
 
     pub fn go_to_end(&mut self) {
+        self.page_scroll = None;
+        self.reading_page = self.page_count().checked_sub(1);
+        self.wheel = None;
         self.scroll_y = self.max_scroll().1;
     }
 
@@ -559,13 +797,19 @@ impl Viewer {
             return None;
         }
 
-        let width = (self.viewport.width - 2.0 * MARGIN - SCROLLBAR_WIDTH) / (self.widest * POINT);
+        let gap = if self.double_page && self.page_count() > 1 {
+            GAP
+        } else {
+            0.0
+        };
+        let width =
+            (self.viewport.width - 2.0 * MARGIN - SCROLLBAR_WIDTH - gap) / (self.widest * POINT);
 
         match fit {
             Fit::Width => Some(width),
             Fit::Page => {
-                let page = self.size(self.current_page());
-                let height = (self.viewport.height - 2.0 * MARGIN) / (page.height * POINT);
+                let height = (self.viewport.height - 2.0 * MARGIN)
+                    / (self.row_height(self.current_page()) as f32 * POINT);
 
                 Some(width.min(height))
             }
@@ -581,6 +825,7 @@ impl Viewer {
     }
 
     pub fn set_fit(&mut self, fit: Fit) {
+        self.page_scroll = None;
         self.fit = fit;
 
         let page = self.current_page();
@@ -594,6 +839,7 @@ impl Viewer {
     /// Zooms keeping the document point under `anchor` (viewport space)
     /// where it is; the viewport centre when `None`.
     pub fn zoom_to(&mut self, zoom: f32, anchor: Option<Point>) {
+        self.page_scroll = None;
         self.fit = Fit::Manual;
         self.apply_zoom(zoom, anchor);
     }
@@ -639,16 +885,17 @@ impl Viewer {
         // Express the anchored point independently of zoom: a page, an
         // offset into it in points, and a horizontal offset from the centre.
         let content_y = self.scroll_y + anchor.y as f64;
-        let page = self.page_at(content_y);
+        let page = self
+            .locate(anchor)
+            .map_or_else(|| self.page_at(content_y), |anchor| anchor.page);
         let into_page = (content_y - self.page_top(page)) / self.ppp();
-        let from_centre =
-            (self.scroll_x + anchor.x as f64 - self.content_width() / 2.0) / self.ppp();
+        let from_left = (self.scroll_x + anchor.x as f64 - self.page_left(page)) / self.ppp();
 
         self.remember_stale_scale();
         self.zoom = zoom;
 
         self.scroll_y = self.page_top(page) + into_page * self.ppp() - anchor.y as f64;
-        self.scroll_x = self.content_width() / 2.0 + from_centre * self.ppp() - anchor.x as f64;
+        self.scroll_x = self.page_left(page) + from_left * self.ppp() - anchor.x as f64;
         self.clamp();
     }
 
@@ -812,7 +1059,11 @@ impl Viewer {
         }
 
         // Thumbnails stand in for pages whose tiles are still rendering.
-        for page in visible.chain(sidebar_thumbnails) {
+        let landing = self.page_scroll.as_ref().map_or(0..0, |navigation| {
+            let first = navigation.page / self.columns() * self.columns();
+            first..(first + self.columns()).min(self.page_count())
+        });
+        for page in visible.chain(sidebar_thumbnails).chain(landing) {
             if self.thumbnails.get(&page).is_none() && !wanted.thumbnails.contains(&page) {
                 wanted.thumbnails.push(page);
             }
@@ -976,7 +1227,16 @@ impl Viewer {
             return None;
         }
 
-        let page = self.page_at(self.scroll_y + point.y as f64);
+        let first = self.page_at(self.scroll_y + point.y as f64);
+        let page = (first..(first + self.columns()).min(self.page_count()))
+            .min_by(|left, right| {
+                let distance = |page| {
+                    let rect = self.page_rect(page);
+                    (rect.x - point.x).max(0.0) + (point.x - rect.x - rect.width).max(0.0)
+                };
+                distance(*left).total_cmp(&distance(*right))
+            })
+            .unwrap_or(first);
         let rect = self.page_rect(page);
         let size = self.size(page);
 
@@ -1003,10 +1263,12 @@ impl Viewer {
     }
 
     pub fn press(&mut self, point: Point, granularity: Granularity, extend: bool) {
+        self.stop_scroll();
         let Some(anchor) = self.locate(point) else {
             return;
         };
 
+        self.reading_page = Some(anchor.page);
         self.selection = match self.selection {
             Some(selection) if extend => Some(Selection {
                 focus: anchor,
@@ -1233,7 +1495,8 @@ impl Viewer {
             self.scroll_y = target;
         }
 
-        let page_left = (self.content_width() - self.size(page).width as f64 * ppp) / 2.0;
+        self.reading_page = Some(page);
+        let page_left = self.page_left(page);
         let left = page_left + rect.x0 as f64 * ppp;
         let right = page_left + rect.x1 as f64 * ppp;
 
@@ -1259,7 +1522,7 @@ impl Viewer {
         let length = ((view / content) as f32 * track)
             .max(SCROLLBAR_MIN)
             .min(track);
-        let progress = (self.scroll_y / (content - view)) as f32;
+        let progress = (self.scroll_y / (content - view)).clamp(0.0, 1.0) as f32;
 
         Some(Rectangle {
             x: self.viewport.width - SCROLLBAR_WIDTH - SCROLLBAR_INSET,
@@ -1836,6 +2099,211 @@ pub(crate) mod tests {
             outline: Vec::new(),
         }));
         viewer
+    }
+
+    #[test]
+    fn thumbnail_navigation_has_the_same_deadline_for_near_and_far_pages() {
+        for double in [false, true] {
+            for page in [3, 9999] {
+                let mut v = viewer(10000);
+                v.set_double_page(double);
+                v.go_to_start();
+                let from = (v.scroll_x, v.scroll_y);
+                v.animate_to_page(page);
+                assert_eq!((v.scroll_x, v.scroll_y), from);
+                let navigation = v.page_scroll.as_ref().unwrap();
+                let start = navigation.progress.started;
+                let to = navigation.to;
+                assert_eq!(
+                    navigation.progress.duration,
+                    std::time::Duration::from_millis(420)
+                );
+                let wanted = v.wanted(0..0);
+                assert!(wanted.thumbnails.contains(&page));
+                assert!(
+                    wanted.tiles.len() < 100,
+                    "only viewport tiles are requested"
+                );
+                v.advance_scroll(start + std::time::Duration::from_millis(210));
+                assert!((v.scroll_y - (from.1 + to.1) / 2.0).abs() < 0.001);
+                assert!(v.scrolling());
+                v.advance_scroll(start + std::time::Duration::from_millis(420));
+                assert_eq!((v.scroll_x, v.scroll_y), to);
+                assert_eq!(v.current_page(), page);
+                assert!(!v.scrolling());
+            }
+        }
+    }
+
+    #[test]
+    fn navigation_retargets_from_current_position_and_repeated_click_keeps_its_deadline() {
+        let mut v = viewer(10000);
+        v.animate_to_page(8000);
+        let start = v.page_scroll.as_ref().unwrap().progress.started;
+        v.advance_scroll(start + std::time::Duration::from_millis(160));
+        let current = (v.scroll_x, v.scroll_y);
+        v.animate_to_page(3);
+        let navigation = v.page_scroll.as_ref().unwrap();
+        let start = navigation.progress.started;
+        let to = navigation.to;
+        assert_eq!(navigation.from, current);
+        assert_eq!((v.scroll_x, v.scroll_y), current);
+        v.animate_to_page(3);
+        assert_eq!(v.page_scroll.as_ref().unwrap().progress.started, start);
+        v.advance_scroll(start + std::time::Duration::from_millis(210));
+        assert!(v.scroll_y < current.1 && v.scroll_y > to.1);
+        v.advance_scroll(start + std::time::Duration::from_millis(900));
+        assert_eq!((v.scroll_x, v.scroll_y), to);
+        assert!(!v.scrolling());
+    }
+
+    #[test]
+    fn user_controls_cancel_navigation_and_same_place_needs_no_frames() {
+        let mut v = viewer(40);
+        v.go_to_page(0);
+        v.animate_to_page(0);
+        assert!(!v.scrolling());
+        v.animate_to_page(30);
+        v.wheel_by(0.0, 56.0);
+        assert!(v.page_scroll.is_none());
+        assert!(v.wheel.is_some());
+        v.animate_to_page(30);
+        v.scroll_to_fraction(0.5);
+        assert!(!v.scrolling());
+        v.animate_to_page(30);
+        v.set_viewport(Size::new(1000.0, 700.0));
+        assert!(!v.scrolling());
+        v.animate_to_page(30);
+        v.zoom_to(v.zoom, None);
+        assert!(!v.scrolling());
+        v.animate_to_page(30);
+        v.press(Point::new(100.0, 100.0), Granularity::Char, false);
+        assert!(!v.scrolling());
+        v.animate_to_page(30);
+        v.go_to_page(1);
+        assert!(!v.scrolling());
+        v.animate_to_page(30);
+        v.set_document(Arc::new(DocInfo {
+            id: 2,
+            path: PathBuf::new(),
+            title: String::new(),
+            pages: vec![LETTER],
+            outline: Vec::new(),
+        }));
+        assert!(!v.scrolling());
+    }
+
+    #[test]
+    fn double_page_pairs_fit_and_right_page_selection_survives_zoom() {
+        let mut v = viewer(5);
+        v.zoom_to(1.25, None);
+        v.set_double_page(true);
+        assert_eq!(v.fit, Fit::Width);
+        let left = v.page_rect(0);
+        let right = v.page_rect(1);
+        assert_eq!(left.y, right.y);
+        assert!(left.x + left.width < right.x);
+        assert!(right.x + right.width <= v.viewport.width);
+        assert!(v.visible_pages().contains(&0) && v.visible_pages().contains(&1));
+        v.insert_text(1, hello());
+        let at = on_screen(&v, 1, 105.0, 105.0);
+        assert_eq!(v.locate(at).unwrap().page, 1);
+        assert!(v.is_over_text(at));
+        v.press(at, Granularity::Word, false);
+        assert_eq!(v.selection().unwrap().0.page, 1);
+        v.insert_text(1, linked());
+        assert!(v.link_at(on_screen(&v, 1, 120.0, 106.0)).is_some());
+        v.zoom_by(1.5, Some(at));
+        let after = v.locate(at).unwrap();
+        assert_eq!(after.page, 1);
+        assert!((after.x - 105.0).abs() < 2.0);
+        assert!((after.y - 105.0).abs() < 2.0);
+        v.set_fit(Fit::Width);
+        v.go_to_page(3);
+        assert_eq!(v.current_page(), 3);
+        v.set_double_page(false);
+        assert_eq!(v.current_page(), 3);
+        assert!(v.page_top(3) > v.page_top(2));
+    }
+
+    #[test]
+    fn double_page_search_reveals_a_match_on_the_right_at_high_zoom() {
+        let mut v = viewer(8);
+        v.set_double_page(true);
+        v.zoom_to(3.0, None);
+        let rect = Rect {
+            x0: 500.0,
+            y0: 30.0,
+            x1: 540.0,
+            y1: 42.0,
+        };
+        v.reveal(5, rect);
+        let left = on_screen(&v, 5, 500.0, 30.0);
+        let right = on_screen(&v, 5, 540.0, 42.0);
+        assert!(left.x >= 0.0 && right.x <= v.viewport.width);
+        assert!(left.y >= 0.0 && right.y <= v.viewport.height);
+        assert_eq!(v.current_page(), 5);
+    }
+
+    #[test]
+    fn double_page_uses_tallest_row_and_centres_an_odd_last_page() {
+        let mut v = viewer(3);
+        v.set_document(Arc::new(DocInfo {
+            id: 2,
+            path: PathBuf::new(),
+            title: String::new(),
+            pages: vec![
+                PageSize {
+                    width: 612.0,
+                    height: 1200.0,
+                },
+                PageSize {
+                    width: 612.0,
+                    height: 300.0,
+                },
+                LETTER,
+            ],
+            outline: Vec::new(),
+        }));
+        v.set_double_page(true);
+        assert!((v.page_top(2) - v.page_top(0) - 1200.0 * v.ppp() - GAP as f64).abs() < 0.01);
+        assert_eq!(v.page_at(v.page_top(0) + 900.0 * v.ppp()), 0);
+        v.go_to_end();
+        assert_eq!(v.current_page(), 2);
+        let last = v.page_rect(2);
+        assert!((last.x + last.width / 2.0 - v.viewport.width / 2.0).abs() < 1.0);
+        let bottom = v.page_top(2) + v.size(2).height as f64 * v.ppp();
+        assert!(bottom <= v.scroll_y + v.viewport.height as f64);
+    }
+
+    #[test]
+    fn wheel_is_smooth_bounces_and_navigation_cancels_it() {
+        let mut v = viewer(3);
+        v.go_to_start();
+        v.wheel_by(0.0, 120.0);
+        assert_eq!(v.scroll_y, 0.0);
+        let start = v.wheel.as_ref().unwrap().last;
+        v.advance_scroll(start + std::time::Duration::from_millis(16));
+        assert!(v.scroll_y > 0.0 && v.scroll_y < 120.0);
+        v.go_to_start();
+        assert!(!v.scrolling());
+        v.wheel_by(0.0, -120.0);
+        let start = v.wheel.as_ref().unwrap().last;
+        v.advance_scroll(start + std::time::Duration::from_millis(16));
+        assert!(v.scroll_y < 0.0);
+        for i in 2..180 {
+            v.advance_scroll(start + std::time::Duration::from_millis(i * 16));
+        }
+        assert_eq!(v.scroll_y, 0.0);
+        assert!(!v.scrolling());
+        v.go_to_end();
+        let end = v.scroll_y;
+        v.wheel_by(0.0, 120.0);
+        let start = v.wheel.as_ref().unwrap().last;
+        v.advance_scroll(start + std::time::Duration::from_millis(16));
+        assert!(v.scroll_y > end);
+        v.scroll_to_fraction(0.5);
+        assert!(!v.scrolling());
     }
 
     #[test]

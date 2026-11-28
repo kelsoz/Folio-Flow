@@ -1425,6 +1425,7 @@ impl App {
             &message,
             Message::Viewer(
                 Interaction::Scrolled { .. }
+                    | Interaction::Panned { .. }
                     | Interaction::Zoomed { .. }
                     | Interaction::Pressed { .. }
                     | Interaction::Dragged { .. }
@@ -1501,6 +1502,7 @@ impl App {
                     self.viewer.set_viewport(size);
                 }
                 Interaction::Scrolled { dx, dy } => self.viewer.wheel_by(dx, dy),
+                Interaction::Panned { dx, dy } => self.viewer.scroll_by(dx, dy),
                 Interaction::Zoomed { factor, at } => self.viewer.zoom_by(factor, Some(at)),
                 Interaction::Pressed {
                     at,
@@ -3427,6 +3429,55 @@ mod tests {
             panic!("expected rgba pixels");
         };
         assert_eq!(pixels[0], source as u8 * 40);
+    }
+
+    #[test]
+    fn middle_pan_takes_over_animations_tracks_the_mouse_and_clamps_each_axis() {
+        for double in [false, true] {
+            let (mut app, _) = App::boot(Options {
+                sidebar: Some("hidden".into()),
+                ..Options::default()
+            });
+            app.viewer.set_document(Arc::new(engine::DocInfo {
+                id: 1,
+                path: PathBuf::new(),
+                title: String::new(),
+                pages: vec![
+                    engine::PageSize {
+                        width: 612.0,
+                        height: 792.0
+                    };
+                    30
+                ],
+                outline: Vec::new(),
+            }));
+            app.order.reset(30);
+            app.viewer_order.reset(30);
+            let _ = app.update(Message::SetReadingLayout(double));
+            app.viewer.zoom_to(3.0, None);
+            app.viewer.scroll_by(500.0, 500.0);
+            app.viewer.animate_to_page(20);
+            let _ = app.update(Message::Viewer(Interaction::Panned { dx: 0.0, dy: 0.0 }));
+            assert!(!app.viewer.scrolling());
+            assert!(app.view_transition.is_none());
+            let before = app.viewer.page_rect(0);
+            let _ = app.update(Message::Viewer(Interaction::Panned {
+                dx: -100.0,
+                dy: -80.0,
+            }));
+            let after = app.viewer.page_rect(0);
+            assert!((after.x - before.x - 100.0).abs() < 1.0);
+            assert!((after.y - before.y - 80.0).abs() < 1.0);
+            app.viewer.set_fit(Fit::Width);
+            let before = app.viewer.page_rect(0);
+            let _ = app.update(Message::Viewer(Interaction::Panned {
+                dx: 100000.0,
+                dy: -100000.0,
+            }));
+            let at_top = app.viewer.page_rect(0);
+            assert_eq!(at_top.x, before.x, "a fitting horizontal axis stays still");
+            assert!(at_top.y >= 0.0, "panning stops at the top boundary");
+        }
     }
 
     #[test]

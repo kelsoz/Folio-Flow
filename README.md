@@ -168,6 +168,14 @@ folio --bench book.pdf
 
 感谢 PDFium（BSD-3-Clause / Apache-2.0）、[bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries)、[pdfium-render](https://github.com/ajrcarey/pdfium-render)、Iced（MIT）和 [Lucide](https://lucide.dev) 图标（ISC）。
 
+## 0.3.10 更新
+
+- 单页、双页支持按住鼠标中键平移，内容跟随鼠标移动，松开停止；窗口失焦也会结束拖动。
+- 不限制缩放比例，只沿有滚动空间的方向移动，到达文档边界停止。正常阅读可上下平移，放大后可双向平移。
+- 中键按下时接管滚动与页面过渡，拖动期间显示抓手光标，不触发文字选择或链接点击。
+
+完整更新内容见 [0.3.10 发布说明](docs/releases/0.3.10.md)。
+
 ## 0.3.9 更新
 
 完整更新内容见 [0.3.9 发布说明](docs/releases/0.3.9.md)。

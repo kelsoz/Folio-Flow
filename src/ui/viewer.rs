@@ -1541,6 +1541,10 @@ pub enum Interaction {
         dx: f32,
         dy: f32,
     },
+    Panned {
+        dx: f32,
+        dy: f32,
+    },
     Zoomed {
         factor: f32,
         at: Point,
@@ -1597,7 +1601,12 @@ enum Drag {
         click: Option<Point>,
     },
     /// Dragging the scrollbar thumb, grabbed this far below its top.
-    Scrollbar { grab: f32 },
+    Scrollbar {
+        grab: f32,
+    },
+    Pan {
+        last: Point,
+    },
 }
 
 #[derive(Default)]
@@ -1667,10 +1676,21 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for View<'_, Message>
                     publish(Interaction::Resized(bounds.size()));
                 }
             }
+            Event::Window(window::Event::Unfocused) => {
+                if state.drag != Drag::None {
+                    shell.request_redraw();
+                }
+                state.drag = Drag::None;
+                state.last_click = None;
+            }
             Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
                 state.modifiers = *modifiers;
             }
             Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+                if matches!(state.drag, Drag::Pan { .. }) {
+                    shell.capture_event();
+                    return;
+                }
                 let Some(position) = cursor.position_in(bounds) else {
                     return;
                 };
@@ -1693,7 +1713,30 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for View<'_, Message>
 
                 shell.capture_event();
             }
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Middle)) => {
+                if state.drag != Drag::None || self.viewer.page_count() == 0 {
+                    return;
+                }
+                let Some(position) = cursor.position_over(bounds) else {
+                    return;
+                };
+                state.drag = Drag::Pan { last: position };
+                state.last_click = None;
+                publish(Interaction::Panned { dx: 0.0, dy: 0.0 });
+                shell.capture_event();
+            }
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Middle))
+                if matches!(state.drag, Drag::Pan { .. }) =>
+            {
+                state.drag = Drag::None;
+                shell.request_redraw();
+                shell.capture_event();
+            }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                if matches!(state.drag, Drag::Pan { .. }) {
+                    shell.capture_event();
+                    return;
+                }
                 let Some(position) = cursor.position_in(bounds) else {
                     return;
                 };
@@ -1744,6 +1787,14 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for View<'_, Message>
                 shell.capture_event();
             }
             Event::Mouse(mouse::Event::CursorMoved { position }) => match &mut state.drag {
+                Drag::Pan { last } => {
+                    publish(Interaction::Panned {
+                        dx: last.x - position.x,
+                        dy: last.y - position.y,
+                    });
+                    *last = *position;
+                    shell.capture_event();
+                }
                 Drag::Select { click } => {
                     let at = local(*position);
 
@@ -1763,7 +1814,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for View<'_, Message>
                 Drag::None => {}
             },
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
-                if state.drag != Drag::None =>
+                if matches!(state.drag, Drag::Select { .. } | Drag::Scrollbar { .. }) =>
             {
                 let drag = std::mem::take(&mut state.drag);
 
@@ -1789,6 +1840,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for View<'_, Message>
         let bounds = layout.bounds();
 
         match state.drag {
+            Drag::Pan { .. } => return mouse::Interaction::Grabbing,
             Drag::Select { click: None } => return mouse::Interaction::Text,
             Drag::Scrollbar { .. } => return mouse::Interaction::Idle,
             // A press that may yet be a click shows what is under it.
@@ -2099,6 +2151,83 @@ pub(crate) mod tests {
             outline: Vec::new(),
         }));
         viewer
+    }
+
+    #[test]
+    fn middle_drag_pans_without_selecting_or_clicking_in_both_layouts() {
+        for double in [false, true] {
+            let mut v = viewer(30);
+            v.set_double_page(double);
+            v.zoom_to(3.0, None);
+            let mut simulator = iced_test::Simulator::with_size(
+                iced::Settings::default(),
+                Size::new(800.0, 600.0),
+                view(&v, Palette::DARK, None, |interaction| interaction),
+            );
+            simulator.point_at(Point::new(300.0, 200.0));
+            simulator.simulate([
+                Event::Mouse(mouse::Event::ButtonPressed(Button::Middle)),
+                Event::Mouse(mouse::Event::CursorMoved {
+                    position: Point::new(260.0, 150.0),
+                }),
+                Event::Mouse(mouse::Event::ButtonReleased(Button::Left)),
+                Event::Mouse(mouse::Event::CursorMoved {
+                    position: Point::new(-20.0, -10.0),
+                }),
+                Event::Mouse(mouse::Event::ButtonReleased(Button::Middle)),
+                Event::Mouse(mouse::Event::CursorMoved {
+                    position: Point::new(100.0, 100.0),
+                }),
+            ]);
+            let messages: Vec<_> = simulator.into_messages().collect();
+            assert!(
+                matches!(
+                    messages.as_slice(),
+                    [
+                        Interaction::Panned { dx: 0.0, dy: 0.0 },
+                        Interaction::Panned { dx: 40.0, dy: 50.0 },
+                        Interaction::Panned {
+                            dx: 280.0,
+                            dy: 160.0
+                        },
+                    ]
+                ),
+                "{messages:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn focus_loss_stops_middle_drag_and_empty_view_does_not_pan() {
+        for pages in [0, 30] {
+            let v = viewer(pages);
+            let mut simulator = iced_test::Simulator::with_size(
+                iced::Settings::default(),
+                Size::new(800.0, 600.0),
+                view(&v, Palette::DARK, None, |interaction| interaction),
+            );
+            simulator.point_at(Point::new(300.0, 200.0));
+            simulator.simulate([
+                Event::Mouse(mouse::Event::ButtonPressed(Button::Middle)),
+                Event::Window(window::Event::Unfocused),
+                Event::Mouse(mouse::Event::CursorMoved {
+                    position: Point::new(500.0, 400.0),
+                }),
+                Event::Mouse(mouse::Event::ButtonReleased(Button::Middle)),
+            ]);
+            let messages: Vec<_> = simulator.into_messages().collect();
+            if pages == 0 {
+                assert!(messages.is_empty(), "{messages:?}");
+            } else {
+                assert!(
+                    matches!(
+                        messages.as_slice(),
+                        [Interaction::Panned { dx: 0.0, dy: 0.0 }]
+                    ),
+                    "{messages:?}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -3334,7 +3334,34 @@ fn shape_window(window: &dyn window::Window, border_color: u32) {
         }
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::msg_send;
+        use objc2::runtime::AnyObject;
+        use window::raw_window_handle::{AppKitWindowHandle, RawWindowHandle};
+
+        let _ = border_color;
+        let RawWindowHandle::AppKit(AppKitWindowHandle { ns_view, .. }) = window
+            .window_handle()
+            .map(|handle| handle.as_raw())
+            .unwrap()
+        else {
+            return;
+        };
+
+        // SAFETY: Iced passes the live main-thread NSView.
+        unsafe {
+            let view = ns_view.as_ptr().cast::<AnyObject>();
+            let _: () = msg_send![view, setWantsLayer: true];
+            let layer: *mut AnyObject = msg_send![view, layer];
+            if !layer.is_null() {
+                let _: () = msg_send![layer, setCornerRadius: 10.0_f64];
+                let _: () = msg_send![layer, setMasksToBounds: true];
+            }
+        }
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
     let _ = (window, border_color);
 }
 
@@ -3534,6 +3561,7 @@ pub fn run(options: Options) -> iced::Result {
             size,
             min_size: Some(Size::new(560.0, 380.0)),
             decorations: false,
+            transparent: cfg!(target_os = "macos"),
             exit_on_close_request: false,
             icon: window_icon(),
             #[cfg(windows)]

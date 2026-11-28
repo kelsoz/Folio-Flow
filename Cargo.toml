@@ -33,6 +33,9 @@ resvg = { version = "0.45", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+
 [target.'cfg(windows)'.dependencies]
 libloading = "0.8"
 memmap2 = "0.9"

@@ -104,6 +104,9 @@ fn main() -> iced::Result {
 /// thread while the main one is starting the graphics device.
 fn discover_fonts() {
     let _ = std::thread::Builder::new().name("fonts".into()).spawn(|| {
+        #[cfg(target_os = "macos")]
+        ui::load_platform_fonts();
+
         let _ = iced::advanced::graphics::text::font_system();
         trace::mark("fonts discovered");
 

@@ -30,11 +30,30 @@ use crate::graphics;
 use icon::Icon;
 use theme::Palette;
 
+#[cfg(target_os = "macos")]
+const PINGFANG_FONT: &str =
+    "/System/Library/PrivateFrameworks/FontServices.framework/Resources/Reserved/PingFangUI.ttc";
+#[cfg(target_os = "macos")]
+static PINGFANG_AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
 /// The interface font: the platform's own where we know its name.
 pub fn font() -> Font {
-    if cfg!(target_os = "windows") {
+    #[cfg(target_os = "windows")]
+    {
         Font::with_name("Microsoft YaHei UI")
-    } else {
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if *PINGFANG_AVAILABLE.get_or_init(|| std::path::Path::new(PINGFANG_FONT).is_file()) {
+            Font::with_name("PingFang SC")
+        } else {
+            Font::with_name("Hiragino Sans")
+        }
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
         Font::DEFAULT
     }
 }
@@ -51,6 +70,18 @@ pub(crate) fn strong() -> Font {
     }
 }
 
+#[cfg(target_os = "macos")]
+pub fn load_platform_fonts() {
+    use iced::advanced::graphics::text::font_system;
+
+    // Iced does not scan the reserved system font directory by default.
+    let mut fonts = font_system().write().unwrap();
+    match std::fs::read(PINGFANG_FONT) {
+        Ok(bytes) => fonts.load_font(bytes.into()),
+        Err(error) => log::warn!("could not load PingFang: {error}"),
+    }
+}
+
 /// Lays out a line in each cut of the interface font, which leaves the font
 /// loaded and matched for the first frame to use.
 pub fn warm_fonts() {
@@ -59,7 +90,7 @@ pub fn warm_fonts() {
 
     for font in [font(), strong()] {
         let _ = Paragraph::with_text(text::Text {
-            content: "Folio Flow 0123456789",
+            content: "Folio Flow 苹方中文字体 0123456789",
             bounds: Size::INFINITE,
             size: theme::TEXT.into(),
             line_height: text::LineHeight::default(),
@@ -510,6 +541,25 @@ mod tests {
     use crate::app::Options;
     use crate::engine::{DocInfo, PageSize};
     use crate::ui::viewer::Interaction;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pingfang_is_loaded_and_selected() {
+        use iced::advanced::graphics::text::font_system;
+
+        assert!(std::path::Path::new(PINGFANG_FONT).is_file());
+        load_platform_fonts();
+
+        let mut fonts = font_system().write().unwrap();
+        assert!(
+            fonts
+                .raw()
+                .db()
+                .faces()
+                .any(|face| face.families.iter().any(|(name, _)| name == "PingFang SC"))
+        );
+        assert_eq!(font().family, font::Family::Name("PingFang SC"));
+    }
 
     #[test]
     fn pages_sidebar_routes_wheel_events_by_pointer_location() {

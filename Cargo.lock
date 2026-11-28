@@ -754,6 +754,7 @@ dependencies = [
  "log",
  "lru 0.18.5",
  "memmap2",
+ "objc2 0.6.5",
  "pdfium-render",
  "resvg",
  "rfd",

@@ -7,3 +7,9 @@
 /docs/WORKING_MEMORY.yaml
 /docs/PERFORMANCE.md
 /docs/UPSTREAM_ANALYSIS.md
+
+# OS metadata
+.DS_Store
+._*
+Thumbs.db
+desktop.ini

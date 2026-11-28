@@ -1,22 +1,24 @@
 //! Per-user preferences, independent of the portable executable location.
 use std::{io, path::PathBuf};
 
-fn path() -> Option<PathBuf> {
+pub fn directory() -> Option<PathBuf> {
     std::env::var_os("APPDATA")
         .or_else(|| std::env::var_os("XDG_CONFIG_HOME"))
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .map(|root| root.join("Folio Flow").join("theme.txt"))
+        .map(|root| root.join("Folio Flow"))
 }
 
 pub fn load_light() -> bool {
-    path()
+    directory()
+        .map(|p| p.join("theme.txt"))
         .and_then(|path| std::fs::read_to_string(path).ok())
         .is_some_and(|value| value.trim() == "light")
 }
 
 pub fn save_light(light: bool) -> io::Result<()> {
-    let path = path()
+    let path = directory()
+        .map(|p| p.join("theme.txt"))
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "No user config directory"))?;
     write_theme(&path, light)
 }
@@ -24,6 +26,20 @@ pub fn save_light(light: bool) -> io::Result<()> {
 fn write_theme(path: &std::path::Path, light: bool) -> io::Result<()> {
     std::fs::create_dir_all(path.parent().unwrap())?;
     std::fs::write(path, if light { "light\n" } else { "dark\n" })
+}
+
+pub fn load_remember() -> bool {
+    directory()
+        .and_then(|p| std::fs::read_to_string(p.join("remember.txt")).ok())
+        .is_none_or(|s| s.trim() != "off")
+}
+pub fn save_remember(remember: bool) -> io::Result<()> {
+    let dir = directory().ok_or_else(|| io::Error::other("No user config directory"))?;
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(
+        dir.join("remember.txt"),
+        if remember { "on" } else { "off" },
+    )
 }
 
 #[cfg(test)]

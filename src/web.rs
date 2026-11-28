@@ -5,6 +5,87 @@
 //! web page. Only web pages and mail addresses get through, and only in a
 //! form that cannot be read as anything more.
 
+/// Explicit settings action; never reachable through a PDF hyperlink.
+#[cfg(windows)]
+pub fn default_pdf() -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    let exe = std::env::current_exe()?;
+    let command = format!("\"{}\" \"%1\"", exe.display());
+    let icon = format!("\"{}\",0", exe.display());
+    let entries = [
+        ("Software\\Classes\\FolioFlow.PDF", "", "Folio Flow PDF"),
+        (
+            "Software\\Classes\\Applications\\Folio Flow.exe",
+            "FriendlyAppName",
+            "Folio Flow",
+        ),
+        (
+            "Software\\Classes\\Applications\\Folio Flow.exe\\shell\\open\\command",
+            "",
+            command.as_str(),
+        ),
+        (
+            "Software\\Classes\\Applications\\Folio Flow.exe\\SupportedTypes",
+            ".pdf",
+            "",
+        ),
+        (
+            "Software\\Classes\\FolioFlow.PDF\\DefaultIcon",
+            "",
+            icon.as_str(),
+        ),
+        (
+            "Software\\Classes\\FolioFlow.PDF\\shell\\open\\command",
+            "",
+            command.as_str(),
+        ),
+        (
+            "Software\\Folio Flow\\Capabilities",
+            "ApplicationName",
+            "Folio Flow",
+        ),
+        (
+            "Software\\Folio Flow\\Capabilities",
+            "ApplicationDescription",
+            "PDF reader and page editor",
+        ),
+        (
+            "Software\\Folio Flow\\Capabilities\\FileAssociations",
+            ".pdf",
+            "FolioFlow.PDF",
+        ),
+        (
+            "Software\\RegisteredApplications",
+            "Folio Flow",
+            "Software\\Folio Flow\\Capabilities",
+        ),
+    ];
+    for (key, name, value) in entries {
+        let mut cmd = Command::new("reg.exe");
+        cmd.creation_flags(0x08000000)
+            .args(["add", &format!("HKCU\\{key}")]);
+        if name.is_empty() {
+            cmd.arg("/ve");
+        } else {
+            cmd.args(["/v", name]);
+        }
+        let output = cmd.args(["/t", "REG_SZ", "/d", value, "/f"]).output()?;
+        if !output.status.success() {
+            return Err(std::io::Error::other(
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ));
+        }
+    }
+    // Leave the protected .pdf UserChoice to Windows and the user.
+    launch("ms-settings:defaultapps?registeredAppUser=Folio%20Flow")
+}
+
+#[cfg(not(windows))]
+pub fn default_pdf() -> std::io::Result<()> {
+    Err(std::io::Error::other("此入口仅支持 Windows"))
+}
+
 /// An address that is safe to open.
 #[derive(Debug, PartialEq)]
 pub struct Address(String);
@@ -68,7 +149,7 @@ impl Address {
 }
 
 #[cfg(windows)]
-fn launch(address: &str) {
+fn launch(address: &str) -> std::io::Result<()> {
     use windows::Win32::System::Com::{
         COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
     };
@@ -83,7 +164,7 @@ fn launch(address: &str) {
         // The shell may hand the address to a COM object.
         let com = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
 
-        ShellExecuteW(
+        let result = ShellExecuteW(
             None,
             PCWSTR(verb.as_ptr()),
             PCWSTR(file.as_ptr()),
@@ -95,24 +176,44 @@ fn launch(address: &str) {
         if com.is_ok() {
             CoUninitialize();
         }
+        let code = result.0 as isize;
+        if code > 32 {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(format!(
+                "Windows shell launch failed ({code})"
+            )))
+        }
     }
 }
 
 #[cfg(not(windows))]
-fn launch(address: &str) {
+fn launch(address: &str) -> std::io::Result<()> {
     use std::process::{Command, Stdio};
 
-    let _ = Command::new("xdg-open")
+    let status = Command::new("xdg-open")
         .arg(address)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other("Could not open system handler"))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_settings_launch_probe_when_requested() {
+        if std::env::var_os("FOLIO_SETTINGS_LAUNCH_PROBE").is_some() {
+            launch("ms-settings:defaultapps?registeredAppUser=Folio%20Flow").unwrap();
+        }
+    }
 
     fn opened(uri: &str) -> Option<String> {
         Address::parse(uri).map(|address| address.0)

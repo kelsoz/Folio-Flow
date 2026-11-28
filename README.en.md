@@ -167,6 +167,15 @@ Based on [Folio](https://github.com/Dethon/folio), retaining the original attrib
 
 Thanks to PDFium (BSD-3-Clause / Apache-2.0), [bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries), [pdfium-render](https://github.com/ajrcarey/pdfium-render), Iced (MIT), and [Lucide](https://lucide.dev) icons (ISC).
 
+## 0.4.1 update
+
+- Unified settings, about, export, compression and unsaved-change dialogs with concise copy and live pixel dimensions.
+- The original file toolbar keeps its width, truncated filename, page field, undo and redo. Its folder button now opens the file menu; the middle ellipsis menu is removed.
+- Settings includes appearance, reading-position memory, record clearing, Windows default-PDF setup and About. Update checking opens the release page.
+- Remembers the page, position within the page, zoom and single/two-page layout in local user configuration without modifying PDFs.
+
+See the [0.4.1 release notes](docs/releases/0.4.1.md).
+
 ## 0.4.0 update
 
 - Hold the middle mouse button to pan in single-page and two-page reading. Content follows the pointer; release or loss of window focus ends the gesture.

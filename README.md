@@ -168,6 +168,15 @@ folio --bench book.pdf
 
 感谢 PDFium（BSD-3-Clause / Apache-2.0）、[bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries)、[pdfium-render](https://github.com/ajrcarey/pdfium-render)、Iced（MIT）和 [Lucide](https://lucide.dev) 图标（ISC）。
 
+## 0.4.1 更新
+
+- 统一设置、关于、导出、压缩和保存确认弹窗，精简说明；图片输出尺寸在倍率或清晰度标题右侧同步显示。
+- 第一组工具栏保持原宽度及文件名截断、页码、撤销与重做，文件夹按钮展开常规文件菜单；移除中间的三点菜单。
+- 设置收纳亮暗外观、阅读位置记忆、清除记录、默认 PDF 阅读器和关于入口。关于显示构建版本，检查更新打开发布页面。
+- 默认记住阅读页码、页内位置、缩放和单双页布局；记录保存在用户配置目录，不修改 PDF。
+
+完整更新内容见 [0.4.1 发布说明](docs/releases/0.4.1.md)。
+
 ## 0.4.0 更新
 
 - 单页、双页支持按住鼠标中键平移，内容跟随鼠标移动，松开停止；窗口失焦也会结束拖动。

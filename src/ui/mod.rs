@@ -181,8 +181,9 @@ fn view_at<'a>(app: &'a App, size: Size) -> Element<'a, Message> {
             container(more_menu(app))
                 .width(Fill)
                 .height(Fill)
-                .align_x(Center)
+                .align_x(iced::Left)
                 .padding(Padding {
+                    left: theme::EDGE,
                     top: theme::EDGE + theme::CHROME_HEIGHT + 8.0,
                     ..Padding::ZERO
                 }),
@@ -292,32 +293,49 @@ pub(crate) fn tool<'a>(
 
 fn more_menu(app: &App) -> Element<'_, Message> {
     let palette = app.palette;
-    let busy = app.document_busy();
-    let has_target = !app.target_slots().is_empty();
-
+    let ready = app.viewer.document().is_some() && !app.document_busy() && app.opening.is_none();
+    let rule = || {
+        container(space().height(1))
+            .width(Fill)
+            .style(move |_| theme::rule(palette))
+    };
     container(
         column![
             menu_item(
+                "打开…",
+                "Ctrl+O",
+                (!app.document_busy()).then_some(Message::OpenDialog),
+                palette
+            ),
+            menu_item(
                 "保存",
                 "Ctrl+S",
-                (!busy && app.edits.dirty()).then_some(Message::Save),
-                palette,
+                (ready && app.edits.dirty()).then_some(Message::Save),
+                palette
             ),
             menu_item(
-                "另存为",
+                "另存为…",
                 "Ctrl+Shift+S",
-                (!busy).then_some(Message::SaveAs),
-                palette,
+                ready.then_some(Message::SaveAs),
+                palette
             ),
-            menu_item("压缩 PDF", "", (!busy).then_some(Message::Compact), palette,),
+            rule(),
+            menu_item("导出…", "Ctrl+E", ready.then_some(Message::Export), palette),
+            if app.window_size.width < 1280.0 {
+                menu_item("压缩 PDF…", "", ready.then_some(Message::Compact), palette)
+            } else {
+                space().height(0).into()
+            },
+            rule(),
+            menu_item("设置…", "", Some(Message::ShowSettings), palette),
             menu_item(
-                "提取页面",
+                "退出",
                 "",
-                (!busy && has_target).then_some(Message::Extract),
-                palette,
+                Some(Message::WindowAction(crate::app::WindowAction::Close)),
+                palette
             ),
         ]
-        .spacing(2)
+        .spacing(3)
         .width(220),
     )
     .padding(6)

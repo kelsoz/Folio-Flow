@@ -257,7 +257,7 @@ pub fn dialog(palette: Palette, progress: f32) -> container::Style {
     let mut style = floating_surface(palette, PANEL_RADIUS);
     style.background = Some(
         Color {
-            a: 0.97,
+            a: 1.0,
             ..palette.surface
         }
         .into(),
@@ -430,6 +430,36 @@ pub fn input(palette: Palette, status: text_input::Status) -> text_input::Style 
     }
 }
 
+pub fn toggle(
+    palette: Palette,
+    status: iced::widget::toggler::Status,
+) -> iced::widget::toggler::Style {
+    use iced::widget::toggler::{Status, Style};
+    let on = match status {
+        Status::Active { is_toggled }
+        | Status::Hovered { is_toggled }
+        | Status::Disabled { is_toggled } => is_toggled,
+    };
+    Style {
+        background: if on {
+            palette.accent
+        } else if matches!(status, Status::Hovered { .. }) {
+            palette.pressed
+        } else {
+            palette.hover
+        }
+        .into(),
+        foreground: if on { palette.on_accent } else { palette.muted }.into(),
+        background_border_width: 0.0,
+        background_border_color: Color::TRANSPARENT,
+        foreground_border_width: 0.0,
+        foreground_border_color: Color::TRANSPARENT,
+        text_color: Some(palette.text),
+        border_radius: None,
+        padding_ratio: 0.14,
+    }
+}
+
 pub fn scroller(palette: Palette, status: scrollable::Status) -> scrollable::Style {
     let engaged = matches!(
         status,
@@ -501,7 +531,7 @@ mod tests {
                     dialog(palette, progress).background,
                     Some(
                         Color {
-                            a: 0.97,
+                            a: 1.0,
                             ..palette.surface
                         }
                         .into()

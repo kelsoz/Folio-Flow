@@ -7,6 +7,7 @@ mod engine;
 mod graphics;
 mod motion;
 mod preferences;
+mod reading;
 mod trace;
 mod ui;
 mod web;

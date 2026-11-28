@@ -120,7 +120,6 @@ pub enum ToolbarControl {
     RotateRight,
     Extract,
     Delete,
-    More,
     Search,
     Print,
     Compress,
@@ -225,6 +224,13 @@ pub enum Message {
     PrintOwner(isize),
     PrintTarget(Once<Result<Option<print::Target>, String>>),
     ToggleTheme,
+    ShowSettings,
+    ShowAbout,
+    ToggleRemember,
+    ClearReading,
+    OpenProject(bool),
+    DefaultPdf,
+    DefaultPdfResult(Result<(), String>),
     Find,
     FindInput(String),
     /// Enter in the find field.
@@ -482,6 +488,10 @@ pub struct App {
     pub toast: Option<Toast>,
     pub opening: Option<PathBuf>,
     pub more_open: bool,
+    pub remember_reading: bool,
+    reading_store: crate::reading::Store,
+    reading_path: Option<PathBuf>,
+    reading_suppressed: bool,
     pub external_drop: file_drop::State,
     pub dialog: Option<dialog::State>,
     pub dialog_motion: Tween,
@@ -581,6 +591,20 @@ impl App {
             toast: None,
             opening: None,
             more_open: false,
+            remember_reading: !cfg!(test) && crate::preferences::load_remember(),
+            reading_store: if cfg!(test) {
+                crate::reading::Store::default()
+            } else {
+                crate::preferences::directory()
+                    .map(|p| crate::reading::Store::load(&p.join("reading.json")))
+                    .unwrap_or_default()
+            },
+            reading_path: if cfg!(test) {
+                None
+            } else {
+                crate::preferences::directory().map(|p| p.join("reading.json"))
+            },
+            reading_suppressed: false,
             external_drop: file_drop::State::default(),
             dialog: None,
             dialog_motion: Tween::new(0.0),
@@ -732,7 +756,39 @@ impl App {
         ui::view(self)
     }
 
+    fn save_reading(&mut self) {
+        if !self.remember_reading
+            || self.reading_suppressed
+            || self.edits.dirty()
+            || self.document_busy
+        {
+            return;
+        }
+        let Some(doc) = self.document() else { return };
+        let path = doc.path.clone();
+        let position = self.viewer.reading_position();
+        if let Some(record_path) = &self.reading_path {
+            self.reading_store = crate::reading::Store::load(record_path);
+        }
+        if self.reading_store.set(&path, position.clone())
+            && let Some(record_path) = &self.reading_path
+        {
+            match self.reading_store.save(record_path) {
+                Ok(()) => trace::note(|| {
+                    format!(
+                        "reading saved: page={}, top={}",
+                        position.page + 1,
+                        position.top
+                    )
+                }),
+                Err(error) => self.notify(format!("无法保存阅读记录：{error}"), Tone::Error),
+            }
+        }
+    }
+
     fn open(&mut self, path: PathBuf) {
+        self.save_reading();
+        self.reading_suppressed = false;
         self.view_transition = None;
         self.external_drop = file_drop::State::default();
         self.dialog = None;
@@ -764,6 +820,8 @@ impl App {
         let (open, height) = (self.sidebar.open, self.sidebar.height);
         let organizer = self.view_mode == ViewMode::Organizer;
         let double_page = self.viewer.is_double_page();
+        let remember = self.remember_reading;
+        let reading_path = self.reading_path.clone();
 
         Box::new(move |doc| {
             let mut viewer = Viewer::default();
@@ -775,7 +833,21 @@ impl App {
             sidebar.open = open;
             sidebar.height = height;
 
+            let position = if remember
+                && options.page.is_none()
+                && options.zoom.is_none()
+                && options.screenshot.is_none()
+            {
+                reading_path
+                    .as_ref()
+                    .and_then(|path| crate::reading::Store::load(path).get(&doc.path))
+            } else {
+                None
+            };
             present(&mut viewer, &mut sidebar, &mut options, doc.clone());
+            if let Some(position) = position {
+                viewer.restore_reading_position(&position);
+            }
 
             let mut order = PageOrder::default();
             order.reset(viewer.page_count());
@@ -924,16 +996,20 @@ impl App {
                 self.open(path);
                 Task::none()
             }
-            LeaveAction::Close => window::oldest()
-                .and_then(window::close::<Message>)
-                .discard(),
+            LeaveAction::Close => {
+                self.save_reading();
+                window::oldest()
+                    .and_then(window::close::<Message>)
+                    .discard()
+            }
         }
     }
 
     fn show_dialog(&mut self, kind: dialog::Kind) {
-        if self.document_busy
-            || self.opening.is_some()
-            || self.document().is_none_or(|doc| doc.pages.is_empty())
+        if !matches!(kind, dialog::Kind::Settings | dialog::Kind::About)
+            && (self.document_busy
+                || self.opening.is_some()
+                || self.document().is_none_or(|doc| doc.pages.is_empty()))
         {
             return;
         }
@@ -1422,6 +1498,12 @@ impl App {
 
     fn handle(&mut self, message: Message) -> Task<Message> {
         if matches!(
+            message,
+            Message::Save | Message::SaveAs | Message::WindowAction(WindowAction::Close)
+        ) {
+            self.more_open = false;
+        }
+        if matches!(
             &message,
             Message::Viewer(
                 Interaction::Scrolled { .. }
@@ -1685,6 +1767,7 @@ impl App {
                 };
             }
             Message::OpenDialog => {
+                self.more_open = false;
                 if self.document_busy {
                     return Task::none();
                 }
@@ -1984,6 +2067,14 @@ impl App {
                 }
             }
             Message::DialogConfirm => {
+                if self.dialog.as_ref().is_some_and(|d| {
+                    matches!(
+                        d.kind,
+                        dialog::Kind::Settings | dialog::Kind::About | dialog::Kind::Leave
+                    )
+                }) {
+                    return Task::none();
+                }
                 let Some(doc) = self.document().cloned() else {
                     return Task::none();
                 };
@@ -2122,11 +2213,56 @@ impl App {
                     }
                 }
             }
-            Message::ToggleMore => {
-                if self.document().is_some() {
-                    self.more_open = !self.more_open;
+            Message::ToggleMore => self.more_open = !self.more_open,
+            Message::ShowSettings => self.show_dialog(dialog::Kind::Settings),
+            Message::ShowAbout => self.show_dialog(dialog::Kind::About),
+            Message::ToggleRemember => {
+                let enabled = !self.remember_reading;
+                match crate::preferences::save_remember(enabled) {
+                    Ok(()) => {
+                        self.remember_reading = enabled;
+                        self.reading_suppressed = false;
+                    }
+                    Err(error) => self.notify(format!("无法保存阅读设置：{error}"), Tone::Error),
                 }
             }
+            Message::ClearReading => {
+                let empty = crate::reading::Store::default();
+                if let Some(path) = &self.reading_path {
+                    match empty.save(path) {
+                        Ok(()) => {
+                            self.reading_store = empty;
+                            self.reading_suppressed = true;
+                            self.notify("已清除阅读记录", Tone::Info);
+                        }
+                        Err(error) => {
+                            self.notify(format!("无法清除阅读记录：{error}"), Tone::Error)
+                        }
+                    }
+                }
+            }
+            Message::OpenProject(releases) => {
+                if let Some(address) = web::Address::parse(if releases {
+                    "https://github.com/kelsoz/Folio-Flow/releases"
+                } else {
+                    "https://github.com/kelsoz/Folio-Flow"
+                }) {
+                    address.open();
+                }
+            }
+            Message::DefaultPdf => {
+                return Task::perform(
+                    async { crate::web::default_pdf().map_err(|e| e.to_string()) },
+                    Message::DefaultPdfResult,
+                );
+            }
+            Message::DefaultPdfResult(result) => match result {
+                Ok(()) => self.notify(
+                    "请在 Windows 设置中选择 Folio Flow 作为 PDF 默认应用",
+                    Tone::Info,
+                ),
+                Err(error) => self.notify(format!("无法打开默认应用设置：{error}"), Tone::Error),
+            },
             Message::Export => self.show_dialog(dialog::Kind::Export),
             Message::Print => {
                 if self.document().is_some() {
@@ -2360,7 +2496,31 @@ impl App {
                 trace::mark("opened received");
                 self.opening = None;
 
+                if self.remember_reading
+                    && let Some(path) = &self.reading_path
+                {
+                    self.reading_store = crate::reading::Store::load(path);
+                }
+                let restore = if self.remember_reading
+                    && self.options.page.is_none()
+                    && self.options.zoom.is_none()
+                    && self.options.screenshot.is_none()
+                {
+                    self.reading_store.get(&doc.path)
+                } else {
+                    None
+                };
                 present(&mut self.viewer, &mut self.sidebar, &mut self.options, doc);
+                if let Some(position) = restore {
+                    self.viewer.restore_reading_position(&position);
+                    trace::note(|| {
+                        format!(
+                            "reading restored: page={}, top={}",
+                            position.page + 1,
+                            position.top
+                        )
+                    });
+                }
                 self.order.reset(self.viewer.page_count());
                 self.edits.reset(self.viewer.page_count());
                 self.viewer_order.reset(self.viewer.page_count());
@@ -3429,6 +3589,92 @@ mod tests {
             panic!("expected rgba pixels");
         };
         assert_eq!(pixels[0], source as u8 * 40);
+    }
+
+    #[test]
+    fn reading_record_restores_through_the_app_open_lifecycle() {
+        let record_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "../TEMP/reading-app-roundtrip-{}.json",
+            std::process::id()
+        ));
+        let (mut first, _) = App::boot(Options::default());
+        first.remember_reading = true;
+        first.reading_path = Some(record_path.clone());
+        first.open(fixture_path());
+        settle(&mut first, |app| app.viewer.document().is_some());
+        let _ = first.update(Message::GoTo(1));
+        let _ = first.update(Message::Viewer(Interaction::Panned { dx: 0.0, dy: 150.0 }));
+        let _ = first.update(Message::Tick(Instant::now() + Duration::from_secs(5)));
+        let expected = first.viewer.reading_position();
+        assert!(
+            !record_path.exists(),
+            "Reading operations must not write a record"
+        );
+        let _ = first.update(Message::WindowAction(WindowAction::Close));
+        assert_eq!(
+            crate::reading::Store::load(&record_path).get(&fixture_path()),
+            Some(expected.clone())
+        );
+        let (mut reopened, _) = App::boot(Options::default());
+        reopened.remember_reading = true;
+        reopened.reading_path = Some(record_path);
+        reopened.open(fixture_path());
+        settle(&mut reopened, |app| app.viewer.document().is_some());
+        assert_eq!(reopened.viewer.reading_position().page, expected.page);
+        assert!((reopened.viewer.reading_position().top - expected.top).abs() < 0.1);
+        for size in [Size::new(900.0, 700.0), Size::new(1100.0, 850.0)] {
+            let _ = reopened.update(Message::Viewer(Interaction::Resized(size)));
+            assert_eq!(reopened.viewer.reading_position().page, expected.page);
+        }
+    }
+
+    #[test]
+    fn user_reading_record_probe_when_requested() {
+        if std::env::var_os("FOLIO_READING_PROBE").is_none() {
+            return;
+        }
+        let dir = crate::preferences::directory().unwrap();
+        let path = dir.join("reading.json");
+        let raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        for entry in raw["entries"].as_array().unwrap() {
+            let file = PathBuf::from(entry["path"].as_str().unwrap());
+            let saved = crate::reading::Store::load(&path)
+                .get(&file)
+                .expect("Existing user record must match its PDF");
+            let (mut app, _) = App::boot(Options::default());
+            app.remember_reading = true;
+            app.reading_path = Some(path.clone());
+            app.reading_suppressed = true;
+            app.open(file);
+            app.reading_suppressed = true;
+            settle(&mut app, |app| app.viewer.document().is_some());
+            assert_eq!(app.viewer.reading_position().page, saved.page);
+            assert!((app.viewer.reading_position().top - saved.top).abs() < 1.0);
+            for size in [Size::new(1100.0, 850.0), Size::new(800.0, 600.0)] {
+                let _ = app.update(Message::Viewer(Interaction::Resized(size)));
+                assert_eq!(app.viewer.reading_position().page, saved.page);
+            }
+            println!(
+                "User record restored at page {}, offset {}",
+                saved.page + 1,
+                saved.top
+            );
+        }
+    }
+
+    #[test]
+    fn settings_and_file_menu_work_without_a_document() {
+        let (mut app, _) = App::boot(Options::default());
+        let _ = app.update(Message::ToggleMore);
+        assert!(app.more_open);
+        let _ = app.update(Message::ShowSettings);
+        assert!(!app.more_open);
+        assert_eq!(app.dialog.as_ref().unwrap().kind, dialog::Kind::Settings);
+        let _ = app.update(Message::DialogConfirm);
+        assert!(!app.document_busy());
+        let _ = app.update(Message::ShowAbout);
+        assert_eq!(app.dialog.as_ref().unwrap().kind, dialog::Kind::About);
     }
 
     #[test]

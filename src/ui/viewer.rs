@@ -365,6 +365,33 @@ impl Viewer {
             })
     }
 
+    pub fn reading_position(&self) -> crate::reading::Position {
+        let page = self.page_at(self.scroll_y);
+        crate::reading::Position {
+            page,
+            top: ((self.scroll_y - self.page_top(page) + GAP.min(MARGIN) as f64) / self.ppp())
+                as f32,
+            zoom: self.zoom,
+            fit: match self.fit {
+                Fit::Width => 0,
+                Fit::Page => 1,
+                Fit::Manual => 2,
+            },
+            double: self.double_page,
+        }
+    }
+
+    pub fn restore_reading_position(&mut self, position: &crate::reading::Position) {
+        self.set_double_page(position.double);
+        self.go_to_page(position.page);
+        match position.fit {
+            0 => self.set_fit(Fit::Width),
+            1 => self.set_fit(Fit::Page),
+            _ => self.zoom_to(position.zoom, None),
+        }
+        self.go_to(position.page, Some(position.top));
+    }
+
     pub fn zoom(&self) -> f32 {
         self.zoom
     }
@@ -2151,6 +2178,30 @@ pub(crate) mod tests {
             outline: Vec::new(),
         }));
         viewer
+    }
+
+    #[test]
+    fn reading_position_restores_page_offset_zoom_and_layout() {
+        for double in [false, true] {
+            for fit in [Fit::Width, Fit::Page, Fit::Manual] {
+                let mut original = viewer(30);
+                original.set_double_page(double);
+                original.go_to_page(10);
+                if fit == Fit::Manual {
+                    original.zoom_to(2.3, None);
+                } else {
+                    original.set_fit(fit);
+                }
+                original.go_to(10, Some(237.5));
+                let position = original.reading_position();
+                let mut reopened = viewer(30);
+                reopened.restore_reading_position(&position);
+                assert_eq!(reopened.is_double_page(), double);
+                assert_eq!(reopened.fit(), fit);
+                assert!((reopened.scroll_y - original.scroll_y).abs() < 0.01);
+                assert!((reopened.zoom - original.zoom).abs() < 0.001);
+            }
+        }
     }
 
     #[test]

@@ -49,13 +49,12 @@ fn read_tools_content_width(app: &App) -> f32 {
     }
 
     width += 4.0 * (TOOL_GAP + TOOL_SIZE);
-    width += TOOL_GAP + DIVIDER_WIDTH;
-    width += TOOL_GAP + TOOL_SIZE;
     width
 }
 
 fn compact_capsule_width(app: &App, width: f32) -> f32 {
-    let content_width = read_tools_content_width(app) + CAPSULE_PADDING_X * 2.0;
+    let content_width =
+        read_tools_content_width(app) + TOOL_SIZE + TOOL_GAP + CAPSULE_PADDING_X * 2.0;
     content_width.min(compact_read_width(width)).max(1.0)
 }
 
@@ -67,7 +66,7 @@ pub fn view(app: &App, width: f32) -> Element<'_, Message> {
     let content: Element<'_, Message> = if width < FULL_WIDTH {
         let read_width = compact_capsule_width(app, width);
         let inner_height = (height - CAPSULE_PADDING_Y * 2.0).max(1.0);
-        let tools = container(read_tools(app))
+        let tools = container(read_tools(app, true))
             .width((read_width - CAPSULE_PADDING_X * 2.0).max(1.0))
             .height(inner_height)
             .align_y(Center);
@@ -95,7 +94,7 @@ pub fn view(app: &App, width: f32) -> Element<'_, Message> {
         row![
             capsule(file_capsule(app), FILE_WIDTH, height, palette),
             drag_space(Fill, height),
-            capsule(read_tools(app), Length::Shrink, height, palette),
+            capsule(read_tools(app, false), Length::Shrink, height, palette),
             drag_space(Fill, height),
             capsule(
                 action_capsule(app, width >= 1560.0),
@@ -215,9 +214,9 @@ fn file_capsule(app: &App) -> Element<'_, Message> {
             app,
             ToolbarControl::Open,
             Icon::Open,
-            "打开 PDF  Ctrl+O",
-            Some(Message::OpenDialog),
-            false,
+            "文件菜单",
+            Some(Message::ToggleMore),
+            app.more_open,
         ),
         container(title).width(Fill).clip(true),
         container(pages).padding([0, 6]),
@@ -245,7 +244,7 @@ fn file_capsule(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-fn read_tools(app: &App) -> Element<'_, Message> {
+fn read_tools(app: &App, compact: bool) -> Element<'_, Message> {
     let palette = app.palette;
     let doc = app.viewer.document();
     let when_open = |message: Message| doc.is_some().then_some(message);
@@ -397,17 +396,23 @@ fn read_tools(app: &App) -> Element<'_, Message> {
             "删除页面  Delete",
             (editable && app.can_delete()).then_some(Message::DeletePages),
             false,
-        ))
-        .push(divider(palette))
-        .push(tool(
-            app,
-            ToolbarControl::More,
-            Icon::More,
-            "更多工具",
-            doc.is_some().then_some(Message::ToggleMore),
-            app.more_open,
         ));
 
+    if compact {
+        tools = row![
+            tool(
+                app,
+                ToolbarControl::Open,
+                Icon::Open,
+                "文件菜单",
+                Some(Message::ToggleMore),
+                app.more_open
+            ),
+            tools
+        ]
+        .spacing(2)
+        .align_y(Center);
+    }
     tools.width(Length::Shrink).into()
 }
 
@@ -454,17 +459,9 @@ fn action_capsule(app: &App, wide: bool) -> Element<'_, Message> {
         tool(
             app,
             ToolbarControl::Theme,
-            if palette.is_dark {
-                Icon::Sun
-            } else {
-                Icon::Moon
-            },
-            if palette.is_dark {
-                "亮色模式"
-            } else {
-                "暗色模式"
-            },
-            Some(Message::ToggleTheme),
+            Icon::Settings,
+            "设置",
+            Some(Message::ShowSettings),
             false,
         ),
         divider(palette),
@@ -855,7 +852,8 @@ mod tests {
             assert!(total <= width, "{total} > {width}");
         }
 
-        let content_width = read_tools_content_width(&app) + CAPSULE_PADDING_X * 2.0;
+        let content_width =
+            read_tools_content_width(&app) + TOOL_SIZE + TOOL_GAP + CAPSULE_PADDING_X * 2.0;
         assert_eq!(compact_capsule_width(&app, 1279.0), content_width);
         assert_eq!(
             compact_capsule_width(&app, 560.0),

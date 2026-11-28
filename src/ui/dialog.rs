@@ -13,6 +13,8 @@ pub enum Kind {
     Export,
     Compress,
     Leave,
+    Settings,
+    About,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,7 +58,7 @@ impl State {
     }
     pub fn operation(&self) -> Operation {
         match self.kind {
-            Kind::Leave => Operation::Compact,
+            Kind::Leave | Kind::Settings | Kind::About => Operation::Compact,
             Kind::Compress if !self.image_pdf => Operation::Compact,
             Kind::Compress => Operation::Raster(Settings {
                 format: Format::Pdf,
@@ -77,232 +79,619 @@ impl State {
     }
 }
 
+fn rule(palette: theme::Palette) -> Element<'static, Message> {
+    container(space().height(1))
+        .width(Fill)
+        .style(move |_| theme::rule(palette))
+        .into()
+}
+
+fn note(value: impl Into<String>, palette: theme::Palette) -> Element<'static, Message> {
+    text(value.into())
+        .size(12)
+        .line_height(1.6)
+        .color(palette.muted)
+        .width(Fill)
+        .into()
+}
+
+// Keep labels close to their controls; the parent column separates groups.
+fn field<'a>(
+    label: Element<'a, Message>,
+    control: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    column![label, control.into()].spacing(9).width(Fill).into()
+}
+
+fn choice<'a>(
+    name: &'a str,
+    active: bool,
+    enabled: bool,
+    message: Message,
+    palette: theme::Palette,
+) -> Element<'a, Message> {
+    button(
+        text(name)
+            .size(12)
+            .line_height(1.6)
+            .width(Fill)
+            .align_x(Center),
+    )
+    .padding([6, 12])
+    .width(Fill)
+    .on_press_maybe(enabled.then_some(message))
+    .style(move |_, status| {
+        let mut style = theme::ghost_button(palette, status, false);
+        if active {
+            style.background = Some(palette.surface.into());
+            style.shadow = iced::Shadow {
+                color: Color::from_rgba(0.0, 0.0, 0.0, 0.12),
+                offset: iced::Vector::new(0.0, 1.0),
+                blur_radius: 4.0,
+            };
+        }
+        style
+    })
+    .into()
+}
+
+fn segment<'a>(items: Vec<Element<'a, Message>>, palette: theme::Palette) -> Element<'a, Message> {
+    container(iced::widget::Row::with_children(items).spacing(3))
+        .padding(3)
+        .width(Fill)
+        .style(move |_| container::Style {
+            background: Some(palette.raised.into()),
+            border: iced::Border {
+                color: palette.border,
+                width: 1.0,
+                radius: 9.0.into(),
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
+fn title<'a>(value: &'a str, palette: theme::Palette) -> Element<'a, Message> {
+    row![
+        text(value)
+            .font(super::strong())
+            .size(19)
+            .color(palette.text),
+        space().width(Fill),
+        button(super::icon::Icon::Close.view(16.0, palette.muted))
+            .padding(6)
+            .on_press(Message::DialogClose)
+            .style(move |_, status| theme::ghost_button(palette, status, false))
+    ]
+    .align_y(Center)
+    .into()
+}
+
+fn dimensions(app: &App, settings: Settings) -> String {
+    app.viewer
+        .document()
+        .and_then(|doc| doc.pages.get(app.viewer.current_page() as usize))
+        .map(|page| match settings.dimensions(*page) {
+            Ok((w, h)) => format!("{w} × {h} 像素"),
+            Err(_) => "尺寸过大".into(),
+        })
+        .unwrap_or_default()
+}
+
+fn dimension_label<'a>(
+    label: &'a str,
+    value: String,
+    palette: theme::Palette,
+) -> Element<'a, Message> {
+    row![
+        text(label).size(12).line_height(1.6).color(palette.muted),
+        space().width(Fill),
+        text(value).size(12).line_height(1.6).color(palette.muted)
+    ]
+    .align_y(Center)
+    .into()
+}
+
 pub fn view(app: &App, size: iced::Size) -> Element<'_, Message> {
     let state = app.dialog.as_ref().expect("visible dialog");
-    let palette = app.palette;
-    if state.kind == Kind::Leave {
-        let content = column![
-            text("保存文档更改？")
-                .font(super::strong())
-                .size(22)
-                .color(palette.text),
-            text("当前文档包含未保存的页面编辑。保存后继续，或放弃更改。")
-                .size(13)
-                .color(palette.muted)
-                .width(Fill),
-            row![
-                space().width(Fill),
-                button(text("取消"))
-                    .padding([9, 12])
-                    .on_press(Message::DialogClose)
-                    .style(move |_, status| theme::ghost_button(palette, status, false)),
-                button(text("不保存"))
-                    .padding([9, 12])
-                    .on_press(Message::LeaveChoice(crate::app::LeaveChoice::Discard))
-                    .style(move |_, status| theme::ghost_button(palette, status, false)),
-                button(text("保存并继续"))
-                    .padding([9, 12])
-                    .on_press(Message::LeaveChoice(crate::app::LeaveChoice::Save))
-                    .style(move |_, status| theme::primary_button(palette, status))
-            ]
-            .spacing(8)
-        ]
-        .spacing(20)
-        .width(Fill);
-        return shell(app, size, content.into());
-    }
-    let title = if state.kind == Kind::Export {
-        "导出文档"
-    } else {
-        "压缩 PDF"
+    let p = app.palette;
+    let enabled = !state.choosing;
+    let secondary = |label: &'static str, message| {
+        button(text(label).size(12))
+            .padding([8, 16])
+            .on_press(message)
+            .style(move |_, status| theme::ghost_button(p, status, false))
     };
-    let label = |value: &str| {
-        text(value.to_owned())
-            .size(13)
-            .color(palette.muted)
-            .width(Fill)
+    let primary = |label: &'static str, message| {
+        button(text(label).size(12).font(super::strong()))
+            .padding([8, 16])
+            .on_press(message)
+            .style(move |_, status| theme::primary_button(p, status))
     };
-    let choice = |name: &str, active, message| -> Element<'_, Message> {
-        button(text(name.to_owned()).size(13))
-            .padding([9, 14])
-            .on_press_maybe((!state.choosing).then_some(message))
-            .style(move |_, status| theme::ghost_button(palette, status, active))
-            .into()
+    let header = match state.kind {
+        Kind::Export => "导出",
+        Kind::Compress => "压缩 PDF",
+        Kind::Leave => "保存更改？",
+        Kind::Settings => "设置",
+        Kind::About => "关于",
     };
-    let mut content = column![
-        row![
-            text(title)
-                .font(super::strong())
-                .size(22)
-                .color(palette.text),
-            space().width(Fill),
-            button(text("关闭").size(12))
-                .on_press(Message::DialogClose)
-                .style(move |_, status| theme::ghost_button(palette, status, false))
-        ]
-        .align_y(Center),
-        label("导出当前文档的全部页面，保留当前页序与旋转。"),
-    ]
-    .spacing(16);
-
-    if let Some(bytes) = state.original_bytes {
-        content = content.push(label(&format!(
-            "原文件大小：{}",
-            crate::app::format_bytes(bytes)
-        )));
-    }
-    if state.kind == Kind::Export {
-        content = content.push(
-            row![
-                choice(
-                    "Markdown",
-                    state.format == ExportFormat::Markdown,
-                    Message::DialogFormat(ExportFormat::Markdown)
-                ),
-                choice(
-                    "JPG 图片",
-                    state.format == ExportFormat::Jpg,
-                    Message::DialogFormat(ExportFormat::Jpg)
-                ),
-                choice(
-                    "PNG 图片",
-                    state.format == ExportFormat::Png,
-                    Message::DialogFormat(ExportFormat::Png)
-                )
-            ]
-            .spacing(8),
-        );
-        if state.format == ExportFormat::Markdown {
-            content = content.push(label("提取文字与基本排版，保存为 Markdown（.md）文件。"));
-        } else {
+    let mut content = column![title(header, p)].spacing(20).width(Fill);
+    match state.kind {
+        Kind::Settings => {
+            let theme_options = segment(
+                vec![
+                    choice(
+                        "浅色",
+                        !p.is_dark,
+                        true,
+                        if p.is_dark {
+                            Message::ToggleTheme
+                        } else {
+                            Message::DialogIgnore
+                        },
+                        p,
+                    ),
+                    choice(
+                        "深色",
+                        p.is_dark,
+                        true,
+                        if p.is_dark {
+                            Message::DialogIgnore
+                        } else {
+                            Message::ToggleTheme
+                        },
+                        p,
+                    ),
+                ],
+                p,
+            );
             content = content
-                .push(label("图片大小 · 72 DPI = 1×"))
+                .push(note("偏好", p))
                 .push(
                     row![
-                        choice("1×", state.scale == 1.0, Message::DialogScale(1.0)),
-                        choice("1.5×", state.scale == 1.5, Message::DialogScale(1.5)),
-                        choice("2×", state.scale == 2.0, Message::DialogScale(2.0)),
-                        choice("3×", state.scale == 3.0, Message::DialogScale(3.0))
+                        text("外观").size(13),
+                        space().width(Fill),
+                        container(theme_options).width(148)
+                    ]
+                    .align_y(Center),
+                )
+                .push(rule(p))
+                .push(
+                    row![
+                        column![
+                            text("记住阅读位置").size(13),
+                            note("再次打开 PDF 时继续阅读", p)
+                        ]
+                        .spacing(4)
+                        .width(Fill),
+                        iced::widget::toggler(app.remember_reading)
+                            .on_toggle(|_| Message::ToggleRemember)
+                            .size(21)
+                            .style(move |_, status| theme::toggle(p, status))
+                    ]
+                    .align_y(Center),
+                )
+                .push(rule(p))
+                .push(
+                    row![
+                        column![
+                            text("默认 PDF 阅读器").size(13),
+                            note("在 Windows 设置中确认", p)
+                        ]
+                        .spacing(4)
+                        .width(Fill),
+                        secondary("设为默认…", Message::DefaultPdf)
+                    ]
+                    .align_y(Center),
+                )
+                .push(rule(p))
+                .push(
+                    button(
+                        row![
+                            text("关于 Folio Flow").size(13),
+                            space().width(Fill),
+                            super::icon::Icon::ChevronRight.view(16.0, p.muted)
+                        ]
+                        .align_y(Center),
+                    )
+                    .width(Fill)
+                    .padding([8, 0])
+                    .on_press(Message::ShowAbout)
+                    .style(move |_, status| theme::ghost_button(p, status, false)),
+                )
+                .push(rule(p))
+                .push(
+                    row![
+                        button(text("清除阅读记录").size(12).color(p.danger))
+                            .padding(0)
+                            .on_press(Message::ClearReading)
+                            .style(move |_, status| {
+                                let mut style = theme::ghost_button(p, status, false);
+                                style.text_color = p.danger;
+                                style
+                            }),
+                        space().width(Fill),
+                        primary("完成", Message::DialogClose)
+                    ]
+                    .align_y(Center),
+                );
+        }
+        Kind::About => {
+            content = content
+                .push(secondary("‹ 返回设置", Message::ShowSettings).padding(0))
+                .push(
+                    container(
+                        column![
+                            super::icon::Icon::DoublePage.view(44.0, p.text),
+                            text("Folio Flow").size(23),
+                            text(format!("版本 {}", env!("CARGO_PKG_VERSION")))
+                                .size(12)
+                                .color(p.faint)
+                                .width(Fill)
+                                .align_x(Center),
+                            text("轻盈的 PDF 阅读与页面编辑工具。\n让阅读、整理与导出更顺手。")
+                                .size(13)
+                                .color(p.muted)
+                                .align_x(Center),
+                            row![
+                                secondary("项目主页 ↗", Message::OpenProject(false)),
+                                secondary("更新说明 ↗", Message::OpenProject(true))
+                            ]
+                            .spacing(8)
+                        ]
+                        .spacing(16)
+                        .align_x(Center),
+                    )
+                    .width(Fill)
+                    .center_x(Fill)
+                    .padding([12, 0]),
+                )
+                .push(rule(p))
+                .push(
+                    row![
+                        note("基于开源项目 Folio", p),
+                        secondary("检查更新 ↗", Message::OpenProject(true))
+                    ]
+                    .align_y(Center),
+                );
+        }
+        Kind::Leave => {
+            content = content
+                .push(note("文档有未保存的页面编辑。", p))
+                .push(rule(p))
+                .push(
+                    row![
+                        secondary("取消", Message::DialogClose),
+                        space().width(Fill),
+                        secondary(
+                            "不保存",
+                            Message::LeaveChoice(crate::app::LeaveChoice::Discard)
+                        ),
+                        primary(
+                            "保存并继续",
+                            Message::LeaveChoice(crate::app::LeaveChoice::Save)
+                        )
                     ]
                     .spacing(8),
-                )
-                .push(label("每页单独保存，自动放入所选目录下的新文件夹。"));
+                );
         }
-    } else {
-        content = content.push(
-            row![
-                choice("无损整理", !state.image_pdf, Message::DialogImagePdf(false)),
-                choice("纯图 PDF", state.image_pdf, Message::DialogImagePdf(true))
-            ]
-            .spacing(8),
-        );
-        if state.image_pdf {
-            content = content.push(label("图片清晰度"))
-                .push(row![choice("轻巧 · 72 DPI", state.dpi == 72.0, Message::DialogDpi(72.0)),
-                    choice("标准 · 144 DPI", state.dpi == 144.0, Message::DialogDpi(144.0)),
-                    choice("高清 · 216 DPI", state.dpi == 216.0, Message::DialogDpi(216.0))].spacing(6))
-                .push(text("每页转为一张图片。文字、链接、书签、表单等数据将移除，批注外观保留在图片中；原文件不变。")
-                    .size(13).color(palette.muted).width(Fill));
-        } else {
-            content = content
-                .push(label(
-                    "重新整理 PDF 存储结构，保留当前文档内容，不降低画质。",
-                ))
-                .push(label("效果取决于原文件，整理后也可能更大。"));
-        }
-    }
-
-    if let Operation::Raster(settings) = state.operation() {
-        if settings.format != Format::Png {
-            content = content.push(label("JPEG 质量")).push(
-                row![
-                    choice(
-                        "体积优先 · 60",
-                        state.quality == 60,
-                        Message::DialogQuality(60)
+        Kind::Export | Kind::Compress => {
+            if state.kind == Kind::Export {
+                content = content.push(field(
+                    note("文件格式", p),
+                    row![
+                        format_card(
+                            "Markdown",
+                            "提取文字",
+                            state.format == ExportFormat::Markdown,
+                            enabled,
+                            Message::DialogFormat(ExportFormat::Markdown),
+                            p
+                        ),
+                        format_card(
+                            "JPG",
+                            "体积更小",
+                            state.format == ExportFormat::Jpg,
+                            enabled,
+                            Message::DialogFormat(ExportFormat::Jpg),
+                            p
+                        ),
+                        format_card(
+                            "PNG",
+                            "清晰无损",
+                            state.format == ExportFormat::Png,
+                            enabled,
+                            Message::DialogFormat(ExportFormat::Png),
+                            p
+                        ),
+                    ]
+                    .spacing(8),
+                ));
+                if state.format == ExportFormat::Markdown {
+                    content = content.push(note("保留文字与基本排版，保存为 .md 文件。", p));
+                } else if let Operation::Raster(settings) = state.operation() {
+                    content = content.push(field(
+                        dimension_label("图片尺寸", dimensions(app, settings), p),
+                        segment(
+                            vec![
+                                choice(
+                                    "1×",
+                                    state.scale == 1.0,
+                                    enabled,
+                                    Message::DialogScale(1.0),
+                                    p,
+                                ),
+                                choice(
+                                    "1.5×",
+                                    state.scale == 1.5,
+                                    enabled,
+                                    Message::DialogScale(1.5),
+                                    p,
+                                ),
+                                choice(
+                                    "2×",
+                                    state.scale == 2.0,
+                                    enabled,
+                                    Message::DialogScale(2.0),
+                                    p,
+                                ),
+                                choice(
+                                    "3×",
+                                    state.scale == 3.0,
+                                    enabled,
+                                    Message::DialogScale(3.0),
+                                    p,
+                                ),
+                            ],
+                            p,
+                        ),
+                    ));
+                }
+            } else {
+                content = content.push(field(
+                    note("压缩方式", p),
+                    segment(
+                        vec![
+                            choice(
+                                "无损整理",
+                                !state.image_pdf,
+                                enabled,
+                                Message::DialogImagePdf(false),
+                                p,
+                            ),
+                            choice(
+                                "纯图压缩",
+                                state.image_pdf,
+                                enabled,
+                                Message::DialogImagePdf(true),
+                                p,
+                            ),
+                        ],
+                        p,
                     ),
-                    choice("均衡 · 75", state.quality == 75, Message::DialogQuality(75)),
-                    choice(
-                        "画质优先 · 90",
-                        state.quality == 90,
-                        Message::DialogQuality(90)
+                ));
+                if state.image_pdf {
+                    if let Operation::Raster(settings) = state.operation() {
+                        content = content.push(field(
+                            dimension_label("清晰度", dimensions(app, settings), p),
+                            segment(
+                                vec![
+                                    choice(
+                                        "轻巧",
+                                        state.dpi == 72.0,
+                                        enabled,
+                                        Message::DialogDpi(72.0),
+                                        p,
+                                    ),
+                                    choice(
+                                        "标准",
+                                        state.dpi == 144.0,
+                                        enabled,
+                                        Message::DialogDpi(144.0),
+                                        p,
+                                    ),
+                                    choice(
+                                        "高清",
+                                        state.dpi == 216.0,
+                                        enabled,
+                                        Message::DialogDpi(216.0),
+                                        p,
+                                    ),
+                                ],
+                                p,
+                            ),
+                        ));
+                    }
+                } else {
+                    content = content.push(note(
+                        "保留内容与画质，优化文件结构。体积可能不变或增大。",
+                        p,
+                    ));
+                }
+            }
+            if let Operation::Raster(settings) = state.operation() {
+                if settings.format != Format::Png {
+                    content = content.push(field(
+                        note("图片质量", p),
+                        segment(
+                            vec![
+                                choice(
+                                    "体积优先",
+                                    state.quality == 60,
+                                    enabled,
+                                    Message::DialogQuality(60),
+                                    p,
+                                ),
+                                choice(
+                                    "均衡",
+                                    state.quality == 75,
+                                    enabled,
+                                    Message::DialogQuality(75),
+                                    p,
+                                ),
+                                choice(
+                                    "画质优先",
+                                    state.quality == 90,
+                                    enabled,
+                                    Message::DialogQuality(90),
+                                    p,
+                                ),
+                            ],
+                            p,
+                        ),
+                    ));
+                }
+                if settings.format == Format::Pdf {
+                    content = content.push(
+                        container(note(
+                            "仅保留页面外观，文字将无法搜索或复制，链接、书签与表单数据也会移除。",
+                            p,
+                        ))
+                        .padding(12)
+                        .style(move |_| container::Style {
+                            background: Some(p.raised.into()),
+                            border: iced::Border {
+                                radius: 8.0.into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }),
+                    );
+                } else {
+                    content = content.push(note("每页一张图片，保存到新文件夹。", p));
+                }
+                if app
+                    .viewer
+                    .document()
+                    .is_some_and(|doc| doc.pages.windows(2).any(|pages| pages[0] != pages[1]))
+                {
+                    content = content.push(note("尺寸以当前页为参考，各页按自身尺寸输出。", p));
+                }
+            }
+            if state.kind == Kind::Compress {
+                let estimate = if state.image_pdf {
+                    match &state.estimate {
+                        None => "估算中…".into(),
+                        Some(Ok(bytes)) => format!("≈ {}", crate::app::format_bytes(*bytes)),
+                        Some(Err(_)) => "暂无法估算".into(),
+                    }
+                } else {
+                    "待估算".into()
+                };
+                let original = state
+                    .original_bytes
+                    .map(crate::app::format_bytes)
+                    .unwrap_or_else(|| "—".into());
+                content = content.push(
+                    container(
+                        row![
+                            column![note("原文件", p), text(original).size(14)].spacing(4),
+                            space().width(Fill),
+                            column![note("预计大小", p), text(estimate).size(18)].spacing(4)
+                        ]
+                        .align_y(Center),
                     )
+                    .padding(16)
+                    .style(move |_| container::Style {
+                        background: Some(p.raised.into()),
+                        border: iced::Border {
+                            radius: 9.0.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }),
+                );
+                if state.image_pdf {
+                    content = content.push(note("抽样估算，实际大小可能有差异。", p));
+                }
+            }
+            let can_export = enabled
+                && app.viewer.document().is_some_and(|doc| {
+                    !doc.pages.is_empty()
+                        && match state.operation() {
+                            Operation::Raster(settings) => {
+                                doc.pages.iter().all(|p| settings.dimensions(*p).is_ok())
+                            }
+                            _ => true,
+                        }
+                });
+            let meta = if state.kind == Kind::Compress {
+                "原文件不变".into()
+            } else {
+                format!("全部 {} 页", app.viewer.page_count())
+            };
+            content = content.push(rule(p)).push(
+                row![
+                    note(meta, p),
+                    secondary("取消", Message::DialogClose),
+                    button(
+                        text(if state.choosing {
+                            "选择保存位置…"
+                        } else if state.kind == Kind::Compress {
+                            "另存为副本…"
+                        } else {
+                            "选择保存位置…"
+                        })
+                        .size(12)
+                        .font(super::strong())
+                    )
+                    .padding([8, 16])
+                    .on_press_maybe(can_export.then_some(Message::DialogConfirm))
+                    .style(move |_, status| theme::primary_button(p, status))
                 ]
-                .spacing(6),
+                .spacing(8)
+                .align_y(Center),
             );
         }
-        if let Some(doc) = app.viewer.document() {
-            let first = settings.dimensions(doc.pages[0]);
-            let current = doc
-                .pages
-                .get(app.viewer.current_page() as usize)
-                .copied()
-                .unwrap_or(doc.pages[0]);
-            let current_dimensions = settings.dimensions(current);
-            let base = Settings {
-                dpi: 72.0,
-                ..settings
-            }
-            .dimensions(current);
-            let mixed = doc.pages.iter().any(|p| *p != doc.pages[0]);
-            let dimensions = match (base, current_dimensions, first) {
-                (Ok((bw, bh)), Ok((w, h)), Ok(_)) => format!(
-                    "当前页：原始 1× {bw} × {bh} 像素 → 输出 {w} × {h} 像素\n共 {} 页 · {} DPI{}",
-                    doc.pages.len(),
-                    settings.dpi,
-                    if mixed {
-                        " · 各页按自身尺寸输出"
-                    } else {
-                        ""
-                    }
-                ),
-                _ => "当前尺寸过大，请降低倍率或清晰度。".into(),
-            };
-            content = content.push(label(&dimensions));
-        }
-        if settings.format == Format::Pdf {
-            let estimate = match &state.estimate {
-                None => "正在抽样预估文件大小…".into(),
-                Some(Ok(bytes)) => format!(
-                    "预计大小：约 {}（抽样估计，实际可能明显偏离）",
-                    crate::app::format_bytes(*bytes)
-                ),
-                Some(Err(error)) => format!("暂时无法预估：{error}"),
-            };
-            content = content.push(label(&estimate));
-        }
     }
+    shell(app, size, content.into())
+}
 
-    let can_export = !state.choosing
-        && app.viewer.document().is_some_and(|doc| {
-            !doc.pages.is_empty()
-                && match state.operation() {
-                    Operation::Raster(settings) => {
-                        doc.pages.iter().all(|p| settings.dimensions(*p).is_ok())
-                    }
-                    _ => true,
-                }
-        });
-    content = content.push(
-        row![
-            space().width(Fill),
-            button(text("取消"))
-                .padding([10, 18])
-                .on_press(Message::DialogClose)
-                .style(move |_, status| theme::ghost_button(palette, status, false)),
-            button(text(if state.choosing {
-                "选择保存位置…"
+fn format_card<'a>(
+    name: &'a str,
+    hint: &'a str,
+    active: bool,
+    enabled: bool,
+    message: Message,
+    p: theme::Palette,
+) -> Element<'a, Message> {
+    button(
+        column![
+            text(if active {
+                "✓"
+            } else if name == "Markdown" {
+                "≡"
             } else {
-                "选择位置并保存"
-            }))
-            .padding([10, 18])
-            .on_press_maybe(can_export.then_some(Message::DialogConfirm))
-            .style(move |_, status| theme::primary_button(palette, status))
+                "▧"
+            })
+            .size(14)
+            .height(18)
+            .color(if active { p.text } else { p.faint }),
+            space().height(12),
+            column![
+                text(name).size(13).line_height(1.6).font(super::strong()),
+                text(hint).size(11).line_height(1.6).color(p.muted)
+            ]
+            .spacing(3),
         ]
-        .spacing(10),
-    );
-
-    shell(app, size, content.width(Fill).into())
+        .spacing(0),
+    )
+    .padding([14, 10])
+    .width(Fill)
+    .on_press_maybe(enabled.then_some(message))
+    .style(move |_, status| {
+        let mut style = theme::ghost_button(p, status, false);
+        if active {
+            style.background = Some(p.raised.into());
+        }
+        style.border = iced::Border {
+            color: if active { p.accent } else { p.border },
+            width: 1.0,
+            radius: 9.0.into(),
+        };
+        style
+    })
+    .into()
 }
 
 fn shell<'a>(
@@ -318,10 +707,11 @@ fn shell<'a>(
                 .width(Fill)
                 .padding(Padding::ZERO.right(16)),
         )
-        .height(Length::Shrink),
+        .height(Length::Shrink)
+        .style(move |_, status| theme::scroller(palette, status)),
     )
-    .padding(28)
-    .width(560)
+    .padding(26)
+    .width(480)
     .max_height((size.height - 64.0).max(1.0))
     .style(move |_| theme::dialog(palette, progress));
     let backdrop = mouse_area(container(space()).width(Fill).height(Fill).style(move |_| {
@@ -375,10 +765,12 @@ mod tests {
         for palette in [theme::Palette::DARK, theme::Palette::LIGHT] {
             app.palette = palette;
             for (width, height) in [(560.0, 380.0), (1360.0, 870.0)] {
-                for variant in 0..6 {
+                for variant in 0..8 {
                     let mut state = State::new(match variant {
                         0..=2 => Kind::Export,
                         5 => Kind::Leave,
+                        6 => Kind::Settings,
+                        7 => Kind::About,
                         _ => Kind::Compress,
                     });
                     state.format = match variant {
@@ -401,7 +793,7 @@ mod tests {
                         ui.snapshot(&app.theme())
                             .unwrap()
                             .matches_image(format!(
-                                "target/daily-dialog-review/{width}-{}-{variant}.png",
+                                "../TEMP/v041-dialog-corrected/{width}-{}-{variant}.png",
                                 palette.is_dark
                             ))
                             .unwrap();
@@ -413,13 +805,18 @@ mod tests {
                             delta: iced::mouse::ScrollDelta::Lines { x: 0.0, y: -100.0 },
                         })]);
                     }
-                    ui.click("取消").unwrap();
+                    ui.click(match variant {
+                        6 => "完成",
+                        7 => "检查更新 ↗",
+                        _ => "取消",
+                    })
+                    .unwrap();
                     let messages: Vec<_> = ui.into_messages().collect();
-                    assert!(
-                        messages
-                            .iter()
-                            .any(|message| matches!(message, Message::DialogClose))
-                    );
+                    assert!(messages.iter().any(|message| if variant == 7 {
+                        matches!(message, Message::OpenProject(true))
+                    } else {
+                        matches!(message, Message::DialogClose)
+                    }));
                     assert!(!messages.iter().any(|message| matches!(
                         message,
                         Message::Viewer(crate::ui::viewer::Interaction::Scrolled { .. })

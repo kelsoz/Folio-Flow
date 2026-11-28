@@ -167,13 +167,13 @@ Based on [Folio](https://github.com/Dethon/folio), retaining the original attrib
 
 Thanks to PDFium (BSD-3-Clause / Apache-2.0), [bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries), [pdfium-render](https://github.com/ajrcarey/pdfium-render), Iced (MIT), and [Lucide](https://lucide.dev) icons (ISC).
 
-## 0.3.10 update
+## 0.4.0 update
 
 - Hold the middle mouse button to pan in single-page and two-page reading. Content follows the pointer; release or loss of window focus ends the gesture.
 - Available at any zoom level, limited independently to each axis with scrollable content and clamped to document boundaries.
 - Panning takes over scroll/view animations, shows a grabbing cursor, and does not select text or activate links.
 
-See the [0.3.10 release notes](docs/releases/0.3.10.md).
+See the [0.4.0 release notes](docs/releases/0.4.0.md).
 
 ## 0.3.9 update
 
